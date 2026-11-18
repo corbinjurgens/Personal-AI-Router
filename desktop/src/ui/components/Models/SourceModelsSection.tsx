@@ -150,11 +150,7 @@ export function SourceModelsSection({
                 >
                     <Stack gap="2">
                         <Flex align="center" justify="between" gap="2">
-                            <NodeChip
-                                name={node.name}
-                                local={node.id === selfId}
-                                offline={node.status === 'offline'}
-                            />
+                            <NodeChip node={node} local={node.id === selfId} />
                             {models.length > 0 && (
                                 <Text kind="body/regular/xs" className="text-subtle-color">
                                     {models.length} {models.length === 1 ? 'model' : 'models'}

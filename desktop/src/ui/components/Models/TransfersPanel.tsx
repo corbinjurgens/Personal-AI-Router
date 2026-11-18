@@ -4,8 +4,9 @@
 import type { ReactNode } from 'react'
 import { Button, Flex, ProgressBar, Stack, Text } from '@nvidia/foundations-react-core'
 import type { EngineProgress } from '@/shared/types/engines'
+import type { NodeItem } from '@/shared/types/nodes'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
-import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
+import { engineProgressKey } from '@/shared/utils/engine-progress'
 import { formatCopyProgressLabel, formatDownloadStatus } from '@/ui/utils/formatters'
 import { Download, Layers } from '@/ui/components/icons'
 
@@ -54,30 +55,34 @@ function TransferRow({
 
 /** Model downloads and copies currently running anywhere in the cluster. */
 export function TransfersPanel({
-    nodeNames,
+    nodesById,
     onViewCopy
 }: {
-    nodeNames: ReadonlyMap<string, string>
+    nodesById: ReadonlyMap<string, NodeItem>
     /** Reopens a copy's dialog so its progress and result can be inspected. */
     onViewCopy: (item: EngineProgress) => void
 }) {
     const progress = useEngineProgressStore(state => state.progress)
-    const inventory = useEngineModelsStore(state => state.models)
-    const copies = Array.from(progress.values()).filter(item => item.operation === 'copy')
-    // Downloads come from each node's current download state, which owns the
-    // download phase, so a download started elsewhere shows here too.
-    const downloads = Array.from(inventory.values()).flatMap(list =>
-        list.downloadStateCurrent === true && list.downloadState
-            ? list.downloadState.entries
-                  .filter(entry => entry.phase === 'queued' || entry.phase === 'in_progress')
-                  .map(entry => ({ nodeId: list.nodeId, entry }))
-            : []
+    const items = Array.from(progress.values())
+    const copies = items.filter(item => item.operation === 'copy')
+    // The progress store carries one pull entry per node, engine and model,
+    // projected from that node's current download state, so a download started
+    // elsewhere shows here too. Departed nodes are left out.
+    const downloads = items.filter(
+        item =>
+            item.operation === 'pull' &&
+            item.downloadStateCurrent === true &&
+            nodesById.has(item.nodeId) &&
+            (item.downloadState?.phase === 'queued' || item.downloadState?.phase === 'in_progress')
     )
     const count = copies.length + downloads.length
     if (count === 0) return null
-    const name = (id: string | undefined) => (id ? (nodeNames.get(id) ?? id) : '')
+    const name = (id: string | undefined) => (id ? (nodesById.get(id)?.name ?? id) : '')
     return (
-        <section className="pair-paper p-4" aria-label="Transfers in progress">
+        <section
+            className="pair-paper p-4 shrink-0 max-h-56 overflow-y-auto"
+            aria-label="Transfers in progress"
+        >
             <Stack gap="3">
                 <Flex align="center" justify="between">
                     <span className="pair-eyebrow">In progress</span>
@@ -85,19 +90,21 @@ export function TransfersPanel({
                         {count} {count === 1 ? 'transfer' : 'transfers'}
                     </Text>
                 </Flex>
-                {downloads.map(({ nodeId, entry }) => (
+                {downloads.map(item => (
                     <TransferRow
-                        key={`${nodeId}:${entry.id}`}
+                        key={engineProgressKey(item)}
                         icon={<Download />}
-                        model={entry.model}
-                        route={`To ${name(nodeId)}`}
-                        percent={entry.phase === 'in_progress' ? entry.percent : undefined}
-                        label={formatDownloadStatus(entry.phase, true)}
+                        model={item.model ?? ''}
+                        route={`To ${name(item.nodeId)}`}
+                        percent={
+                            item.downloadState?.phase === 'in_progress' ? item.percent : undefined
+                        }
+                        label={formatDownloadStatus(item.downloadState?.phase ?? 'unknown', true)}
                     />
                 ))}
                 {copies.map(item => (
                     <TransferRow
-                        key={item.opId ?? `${item.nodeId}:${item.engineType}:${item.model ?? ''}`}
+                        key={engineProgressKey(item)}
                         icon={<Layers />}
                         model={item.model ?? ''}
                         route={`${name(item.sourceNodeId)} to ${name(item.destinationNodeId ?? item.nodeId)}`}

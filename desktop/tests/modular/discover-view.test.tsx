@@ -100,6 +100,37 @@ async function openPage(): Promise<void> {
     await act(async () => root.render(<DiscoverView />))
 }
 
+function catalogEntry(name: string, downloads: number) {
+    return {
+        id: name,
+        name,
+        author: name.slice(0, name.indexOf('/')),
+        url: `https://huggingface.co/${name.slice(0, name.lastIndexOf(':'))}`,
+        downloads,
+        likes: 0,
+        updatedAt: '2026-11-13T00:00:00.000Z',
+        tags: []
+    }
+}
+
+async function pickModel(title: string): Promise<void> {
+    const row = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('[aria-label="Models"] button')
+    ).find(item => item.textContent?.includes(title))
+    if (!row) throw new Error(`Missing catalog row: ${title}`)
+    await act(async () => row.click())
+}
+
+async function typeSearch(text: string): Promise<void> {
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Search models"]')
+    if (!input) throw new Error('Missing search field')
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    await act(async () => {
+        setValue?.call(input, text)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+}
+
 function sources(): HTMLInputElement[] {
     return Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
 }
@@ -273,6 +304,7 @@ describe('Discover page', () => {
             ]
         })
         await openPage()
+        await pickModel('Model 27B')
         expect(catalogFiles).toHaveBeenCalledWith('llama-cpp', 'owner/Model-27B-GGUF')
         const details = document.querySelector('[aria-label="owner/Model-27B-GGUF details"]')
         expect(details?.textContent).toContain('6.8M')
@@ -284,6 +316,98 @@ describe('Discover page', () => {
         expect(first?.textContent).toContain('Suggested')
         await act(async () => button('Download UD-Q4_K_M').click())
         expect(pullModel).toHaveBeenCalledWith('llama-cpp', 'msi', 'owner/Model-27B-GGUF:UD-Q4_K_M')
+    })
+
+    it('lists no repository files until a model is picked', async () => {
+        searchHub.mockResolvedValue({
+            models: [
+                catalogEntry('owner/Alpha-GGUF:Q4_K_M', 20),
+                catalogEntry('owner/Beta-GGUF:Q4_K_M', 10)
+            ]
+        })
+        catalogFiles.mockResolvedValue({ repo: 'owner/Beta-GGUF', revision: 'b', files: [] })
+        await openPage()
+        expect(catalogFiles).not.toHaveBeenCalled()
+        expect(document.body.textContent).toContain('Pick a model')
+        await pickModel('Beta')
+        expect(catalogFiles).toHaveBeenCalledExactlyOnceWith('llama-cpp', 'owner/Beta-GGUF')
+    })
+
+    it('keeps the picked model and lists its files once while the filter changes', async () => {
+        searchHub.mockResolvedValue({
+            models: [
+                catalogEntry('owner/Alpha-GGUF:Q4_K_M', 20),
+                catalogEntry('owner/Beta-GGUF:Q4_K_M', 10)
+            ]
+        })
+        catalogFiles.mockResolvedValue({ repo: 'owner/Beta-GGUF', revision: 'b', files: [] })
+        await openPage()
+        await pickModel('Beta')
+        await typeSearch('alp')
+        await typeSearch('alpha')
+        expect(catalogFiles).toHaveBeenCalledExactlyOnceWith('llama-cpp', 'owner/Beta-GGUF')
+        expect(document.querySelector('[aria-label="owner/Beta-GGUF details"]')).not.toBeNull()
+    })
+
+    it('ignores a download by another engine of the same name on the target', async () => {
+        catalogFiles.mockResolvedValue({
+            repo: 'owner/Model-GGUF',
+            revision: 'a'.repeat(40),
+            files: [
+                {
+                    quantization: 'Q4_K_M',
+                    name: 'owner/Model-GGUF:Q4_K_M',
+                    sizeBytes: 400,
+                    shards: 1
+                }
+            ]
+        })
+        const msi = inventory('msi', [])
+        useEngineModelsStore.setState({
+            models: new Map([
+                [
+                    'msi:llama-cpp',
+                    {
+                        ...msi,
+                        downloadState: msi.downloadState && {
+                            ...msi.downloadState,
+                            entries: [
+                                {
+                                    id: 'other-engine',
+                                    engine: 'llamacpp-fork',
+                                    model: 'owner/Model-GGUF:Q4_K_M',
+                                    phase: 'in_progress',
+                                    blocksReadiness: true,
+                                    percent: 50
+                                }
+                            ]
+                        }
+                    }
+                ]
+            ])
+        })
+        await openPage()
+        await openSource('Paste a link')
+        await findFiles('owner/Model-GGUF')
+        const download = button('Download Q4_K_M')
+        expect(download.disabled).toBe(false)
+        expect(download.textContent).toContain('Download')
+        expect(download.textContent).not.toContain('Downloading')
+    })
+
+    it('dims an offline holder in the cluster list', async () => {
+        vi.mocked(useOverviewNodes).mockReturnValue([
+            node('msi', 'MSI'),
+            { ...node('joes', 'Joes'), status: 'offline' }
+        ])
+        await openPage()
+        await openSource('Your cluster')
+        const chips = Array.from(document.querySelectorAll('.pair-node-chip')).map(chip => [
+            chip.textContent,
+            chip.getAttribute('data-offline')
+        ])
+        expect(chips.length).toBeGreaterThan(0)
+        expect(chips).toEqual(chips.map(() => ['Joes', 'true']))
     })
 
     it('downloads a chosen quantization of a pasted repository to the target node', async () => {

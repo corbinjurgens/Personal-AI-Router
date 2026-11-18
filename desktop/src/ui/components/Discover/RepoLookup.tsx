@@ -10,6 +10,7 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { Monogram } from '@/ui/components/Page/PagePrimitives'
 import { hubModelFacts } from '@/ui/utils/hub-model-facts'
 import getErrorString from '@/shared/utils/get-error-string'
+import { readableServiceError } from '@/ui/utils/readable-service-error'
 import { QuantizationList } from './QuantizationList'
 
 /** Paste a Hugging Face repository or link, then download one of its quantizations. */
@@ -40,7 +41,7 @@ export function RepoLookup({
             setListing(await window.pairApi.engines.catalogFiles('llama-cpp', repo))
         } catch (err) {
             setListing(null)
-            setError(getErrorString(err))
+            setError(readableServiceError(getErrorString(err)))
         } finally {
             setLoading(false)
         }

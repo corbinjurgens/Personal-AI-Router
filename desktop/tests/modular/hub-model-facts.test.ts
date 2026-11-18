@@ -9,7 +9,7 @@ describe('hub model facts', () => {
         const facts = hubModelFacts('unsloth/Qwen3.8-27B-GGUF:Q4_K_M')
         expect(facts).toMatchObject({
             repo: 'unsloth/Qwen3.8-27B-GGUF',
-            title: 'Qwen3.8-27B',
+            title: 'Qwen3.8 27B',
             quantization: 'Q4_K_M',
             parameters: '27B'
         })
@@ -21,6 +21,12 @@ describe('hub model facts', () => {
         expect(facts.parameters).toBe('35B')
         expect(facts.activeParameters).toBe('3B')
         expect(facts.capabilities).toContain('Mixture of experts')
+    })
+
+    it('prefers the catalog parameter size and keeps the active split from the name', () => {
+        const facts = hubModelFacts('ggml-org/Qwen3.6-35B-A3B-GGUF:Q4_K_M', [], '34.7B')
+        expect(facts.parameters).toBe('34.7B')
+        expect(facts.activeParameters).toBe('3B')
     })
 
     it('reads licence, base model, languages and capabilities from tags', () => {

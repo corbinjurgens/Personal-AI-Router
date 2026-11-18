@@ -39,11 +39,8 @@ export function useModelHubSearch(engine: EngineType | null) {
     const searchGenRef = useRef(0)
     const submittedQueryRef = useRef('')
 
-    const addError = useCallback((error: unknown) => {
-        setErrors(prev => [
-            ...prev,
-            { id: performance.now().toString(), message: getErrorString(error) }
-        ])
+    const addError = useCallback((message: string) => {
+        setErrors(prev => [...prev, { id: performance.now().toString(), message }])
     }, [])
 
     const loadModels = useCallback(
@@ -65,7 +62,7 @@ export function useModelHubSearch(engine: EngineType | null) {
             } catch (error) {
                 if (fetchGenRef.current !== gen) return
                 console.warn('Model hub load error', error)
-                addError(error)
+                addError(getErrorString(error))
                 setAllModels([])
                 setLoading(false)
             }
@@ -122,7 +119,7 @@ export function useModelHubSearch(engine: EngineType | null) {
                 setRemoteModels(result)
             } catch (error) {
                 if (searchGenRef.current !== generation) return
-                addError(error)
+                addError(getErrorString(error))
             } finally {
                 if (searchGenRef.current === generation) setSearching(false)
             }

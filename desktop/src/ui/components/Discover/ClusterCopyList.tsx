@@ -3,6 +3,7 @@
 
 import { useMemo } from 'react'
 import { Button, Flex, Stack, Tag, Text } from '@nvidia/foundations-react-core'
+import type { NodeItem } from '@/shared/types/nodes'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import {
     clusterVariantSize,
@@ -20,18 +21,18 @@ import { Layers } from '@/ui/components/icons'
  */
 export function ClusterCopyList({
     targetNodeId,
-    nodeNames,
+    nodesById,
     onCopy
 }: {
     targetNodeId: string
-    nodeNames: ReadonlyMap<string, string>
+    nodesById: ReadonlyMap<string, NodeItem>
     onCopy: (source: ClusterModelLocation) => void
 }) {
     const inventory = useEngineModelsStore(state => state.models)
     const rows = useMemo(
         () =>
             groupClusterModels(
-                Array.from(inventory.values()).filter(list => nodeNames.has(list.nodeId))
+                Array.from(inventory.values()).filter(list => nodesById.has(list.nodeId))
             ).flatMap(group =>
                 group.variants
                     .filter(variant =>
@@ -39,9 +40,9 @@ export function ClusterCopyList({
                     )
                     .map(variant => ({ group, variant }))
             ),
-        [inventory, nodeNames, targetNodeId]
+        [inventory, nodesById, targetNodeId]
     )
-    const name = (nodeId: string) => nodeNames.get(nodeId) ?? nodeId
+    const name = (nodeId: string) => nodesById.get(nodeId)?.name ?? nodeId
 
     return (
         <section className="pair-paper p-5 min-h-0 overflow-y-auto" aria-label="Your cluster">
@@ -65,9 +66,9 @@ export function ClusterCopyList({
                             ...new Set(
                                 variant.locations
                                     .filter(location => location.nodeId !== targetNodeId)
-                                    .map(location => name(location.nodeId))
+                                    .map(location => location.nodeId)
                             )
-                        ]
+                        ].flatMap(id => nodesById.get(id) ?? [])
                         const size = clusterVariantSize(variant)
                         const facts = hubModelFacts(group.name)
                         return (
@@ -97,7 +98,7 @@ export function ClusterCopyList({
                                             </Text>
                                         )}
                                         {holders.map(holder => (
-                                            <NodeChip key={holder} name={holder} />
+                                            <NodeChip key={holder.id} node={holder} />
                                         ))}
                                     </Flex>
                                 </Stack>

@@ -33,8 +33,8 @@ const NO_MODELS: never[] = []
 export default function DiscoverView() {
     const nodes = useOverviewNodes()
     const selfId = useConnectionStore(state => state.selfId)
-    const nodeNames = useMemo(() => new Map(nodes.map(node => [node.id, node.name])), [nodes])
-    const holders = useClusterModelHolders(nodeNames)
+    const nodesById = useMemo(() => new Map(nodes.map(node => [node.id, node])), [nodes])
+    const holders = useClusterModelHolders(nodesById)
     const [chosen, setChosen] = useState('')
     const [source, setSource] = useState<DiscoverSource>('browse')
     const [copy, setCopy] = useState<{
@@ -49,7 +49,7 @@ export default function DiscoverView() {
         nodes.find(node => node.id === selfId)?.id ??
         nodes[0]?.id ??
         ''
-    const targetName = nodeNames.get(target) ?? target
+    const targetName = nodesById.get(target)?.name ?? target
     const downloaded =
         useEngineModelsStore(state => state.models.get(`${target}:llama-cpp`)?.models) ?? NO_MODELS
     const download = (name: string) => {
@@ -80,7 +80,7 @@ export default function DiscoverView() {
                 }
             />
             <TransfersPanel
-                nodeNames={nodeNames}
+                nodesById={nodesById}
                 onViewCopy={item =>
                     setCopy({
                         engineType: item.engineType,
@@ -120,7 +120,7 @@ export default function DiscoverView() {
             {source === 'cluster' && (
                 <ClusterCopyList
                     targetNodeId={target}
-                    nodeNames={nodeNames}
+                    nodesById={nodesById}
                     onCopy={location =>
                         setCopy({
                             engineType: location.engineType,

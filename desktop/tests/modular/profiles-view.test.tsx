@@ -345,6 +345,46 @@ describe('Profiles tab', () => {
         }
     )
 
+    it('shows the GGUF name and quantization source of a model without a repository', async () => {
+        const observed: EngineModels = {
+            nodeId: 'self',
+            engineType: 'llama-cpp',
+            models: [
+                {
+                    name: 'self-artifact',
+                    downloaded: true,
+                    size: 100,
+                    status: 'idle',
+                    parameterSize: '',
+                    family: '',
+                    sizeVram: null,
+                    expiresAt: null,
+                    expiry: '0',
+                    capabilities: [],
+                    identity: {
+                        strength: 'declared',
+                        generalName: 'Local Model',
+                        quantization: 'Q5_K_M',
+                        quantizationSource: 'gguf-file-type'
+                    }
+                }
+            ]
+        }
+        useEngineModelsStore.setState({ models: new Map([['self:llama-cpp', observed]]) })
+        await act(async () => root.render(<ProfilesView />))
+        const identity = card('self coding').querySelector('[aria-label="Model identity"]')
+        const tags = Array.from(identity?.querySelectorAll('[title]') ?? []).map(tag => [
+            tag.textContent,
+            tag.getAttribute('title')
+        ])
+        expect(tags).toEqual([
+            ['Q5_K_M', 'Quantization source: gguf-file-type'],
+            ['Local Model', 'Name from GGUF general.name']
+        ])
+        expect(card('self coding').textContent).not.toContain('Unknown')
+        expect(card('self coding').textContent).not.toContain('self-artifact')
+    })
+
     it('keeps first-entry loading rows until the pending advertisement read completes', async () => {
         let finish: ((nodes: AvailableNode[]) => void) | undefined
         window.pairApi.discovery.getNodes = vi.fn<typeof window.pairApi.discovery.getNodes>(

@@ -5,6 +5,8 @@ import { useState } from 'react'
 import { Badge, Button, Flex, ProgressBar, Stack, Tag, Text } from '@nvidia/foundations-react-core'
 import type { EngineCatalogFile } from '@/shared/types/engine-api'
 import type { ModelItem } from '@/shared/types/engines'
+import type { NodeItem } from '@/shared/types/nodes'
+import { engineManagerName } from '@/shared/utils/engines'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { formatBytes, formatDownloadStatus } from '@/ui/utils/formatters'
@@ -32,8 +34,8 @@ export function QuantizationList({
     targetName: string
     /** The target node's llama.cpp models, to mark files it already holds. */
     downloadedModels: readonly ModelItem[]
-    /** Names of the nodes that hold a quantization, for the "On" chips. */
-    holders: (quantization: string) => string[]
+    /** The nodes that hold a quantization, for the "On" chips. */
+    holders: (quantization: string) => NodeItem[]
     /** The quantization the catalog suggests, marked as a starting point. */
     recommended?: string
     onDownload: (name: string) => void
@@ -65,7 +67,11 @@ export function QuantizationList({
                     )
                     const entry =
                         target?.downloadStateCurrent === true
-                            ? target.downloadState?.entries.find(row => row.model === file.name)
+                            ? target.downloadState?.entries.find(
+                                  row =>
+                                      row.engine === engineManagerName('llama-cpp') &&
+                                      row.model === file.name
+                              )
                             : undefined
                     const starting =
                         usePendingActionsStore
@@ -113,7 +119,7 @@ export function QuantizationList({
                                             On
                                         </Text>
                                         {nodes.map(node => (
-                                            <NodeChip key={node} name={node} />
+                                            <NodeChip key={node.id} node={node} />
                                         ))}
                                     </Flex>
                                 )}

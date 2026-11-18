@@ -30,13 +30,13 @@ import type { EngineType } from '@/shared/types/engines'
 export function ModelsView() {
     const inventory = useEngineModelsStore(state => state.models)
     const nodes = useOverviewNodes()
-    const nodeNames = useMemo(() => new Map(nodes.map(node => [node.id, node.name])), [nodes])
+    const nodesById = useMemo(() => new Map(nodes.map(node => [node.id, node])), [nodes])
     const groups = useMemo(
         () =>
             groupClusterModels(
-                Array.from(inventory.values()).filter(list => nodeNames.has(list.nodeId))
+                Array.from(inventory.values()).filter(list => nodesById.has(list.nodeId))
             ),
-        [inventory, nodeNames]
+        [inventory, nodesById]
     )
     const [query, setQuery] = useState('')
     const refreshSources = useSourceModelsStore(state => state.refreshAll)
@@ -54,7 +54,7 @@ export function ModelsView() {
                       variant.quantization,
                       ...variant.locations.flatMap(location => [
                           location.model.name,
-                          nodeNames.get(location.nodeId) ?? location.nodeId
+                          nodesById.get(location.nodeId)?.name ?? location.nodeId
                       ])
                   ])
               ].some(text => text.toLowerCase().includes(needle))
@@ -135,7 +135,7 @@ export function ModelsView() {
             )}
 
             <TransfersPanel
-                nodeNames={nodeNames}
+                nodesById={nodesById}
                 onViewCopy={item =>
                     setCopy({
                         engineType: item.engineType,
@@ -188,7 +188,7 @@ export function ModelsView() {
                         <ModelGroup
                             key={group.key}
                             group={group}
-                            nodeNames={nodeNames}
+                            nodesById={nodesById}
                             onCopy={openCopy}
                             onDelete={location => {
                                 void deletion.request(
@@ -223,7 +223,7 @@ export function ModelsView() {
                 <ModelSettingsPanel
                     key={profileFor}
                     targetId={selfId}
-                    nodeName={nodeNames.get(selfId) ?? 'This PC'}
+                    nodeName={nodesById.get(selfId)?.name ?? 'This PC'}
                     identity={{
                         engine: engineManagerName(SOURCE_MODELS_ENGINE_TYPE),
                         model: profileFor

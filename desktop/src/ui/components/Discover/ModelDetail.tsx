@@ -13,6 +13,7 @@ import { OpenInNew } from '@/ui/components/icons'
 import { hubModelFacts } from '@/ui/utils/hub-model-facts'
 import { formatCompactCount, formatRelativeTime } from '@/ui/utils/formatters'
 import getErrorString from '@/shared/utils/get-error-string'
+import { readableServiceError } from '@/ui/utils/readable-service-error'
 import { QuantizationList } from './QuantizationList'
 
 function Fact({ label, value }: { label: string; value?: string }) {
@@ -45,7 +46,7 @@ export function ModelDetail({
     holders: ClusterModelHolders
     onDownload: (name: string) => void
 }) {
-    const facts = hubModelFacts(model.name, model.tags)
+    const facts = hubModelFacts(model.name, model.tags, model.parameterSize)
     const [listing, setListing] = useState<EngineCatalogFilesResponse | null>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState('')
@@ -61,7 +62,7 @@ export function ModelDetail({
                 if (active) setListing(result)
             })
             .catch(err => {
-                if (active) setError(getErrorString(err))
+                if (active) setError(readableServiceError(getErrorString(err)))
             })
             .finally(() => {
                 if (active) setLoading(false)
@@ -71,11 +72,10 @@ export function ModelDetail({
         }
     }, [facts.repo])
 
-    const parameters = facts.parameters
-        ? facts.activeParameters
+    const parameters =
+        facts.parameters && facts.activeParameters
             ? `${facts.parameters} (${facts.activeParameters} active)`
             : facts.parameters
-        : model.parameterSize
     const languages =
         facts.languages.length > 6
             ? `${facts.languages.slice(0, 6).join(', ')} and ${facts.languages.length - 6} more`

@@ -7,6 +7,7 @@ import {
     type ClusterModelGroup,
     type ClusterModelLocation
 } from '@/ui/utils/group-cluster-models'
+import type { NodeItem } from '@/shared/types/nodes'
 import { Monogram, NodeChip } from '@/ui/components/Page/PagePrimitives'
 import { Layers } from '@/ui/components/icons'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -22,12 +23,12 @@ import { hubModelFacts } from '@/ui/utils/hub-model-facts'
 
 function ModelLocation({
     location,
-    nodeName,
+    node,
     onCopy,
     onDelete
 }: {
     location: ClusterModelLocation
-    nodeName: string
+    node: NodeItem
     onCopy: (location: ClusterModelLocation) => void
     onDelete: (location: ClusterModelLocation) => void
 }) {
@@ -74,7 +75,7 @@ function ModelLocation({
     return (
         <li className="flex items-center gap-3 py-2 pair-divider-top first:border-t-0">
             <Flex gap="2" align="center" className="min-w-0 grow">
-                <NodeChip name={nodeName} local={local} title={`Served as ${model.name}`} />
+                <NodeChip node={node} local={local} title={`Served as ${model.name}`} />
                 <Text
                     kind="mono/sm"
                     className="text-subtle-color truncate min-w-0"
@@ -124,21 +125,21 @@ function splitRepository(name: string): { title: string; owner?: string } {
 
 export function ModelGroup({
     group,
-    nodeNames,
+    nodesById,
     onCopy,
     onDelete
 }: {
     group: ClusterModelGroup
-    nodeNames: ReadonlyMap<string, string>
+    nodesById: ReadonlyMap<string, NodeItem>
     onCopy: (location: ClusterModelLocation) => void
     onDelete: (location: ClusterModelLocation) => void
 }) {
     const { title, owner } = splitRepository(group.name)
-    const holderIds = [
+    const holders = [
         ...new Set(
             group.variants.flatMap(variant => variant.locations.map(location => location.nodeId))
         )
-    ]
+    ].flatMap(id => nodesById.get(id) ?? [])
     return (
         <section className="pair-paper p-4" aria-label={group.name}>
             <Flex align="center" gap="3">
@@ -157,8 +158,8 @@ export function ModelGroup({
                     </Text>
                 </Stack>
                 <Flex gap="1" wrap="wrap" justify="end" className="shrink-0 max-w-[45%]">
-                    {holderIds.map(id => (
-                        <NodeChip key={id} name={nodeNames.get(id) ?? id} />
+                    {holders.map(node => (
+                        <NodeChip key={node.id} node={node} />
                     ))}
                 </Flex>
             </Flex>
@@ -184,15 +185,20 @@ export function ModelGroup({
                                 )}
                             </Flex>
                             <ul className="m-0 p-0 list-none">
-                                {variant.locations.map(location => (
-                                    <ModelLocation
-                                        key={`${location.nodeId}:${location.engineType}:${location.model.name}`}
-                                        location={location}
-                                        nodeName={nodeNames.get(location.nodeId) ?? location.nodeId}
-                                        onCopy={onCopy}
-                                        onDelete={onDelete}
-                                    />
-                                ))}
+                                {variant.locations.flatMap(location => {
+                                    const node = nodesById.get(location.nodeId)
+                                    return node ? (
+                                        <ModelLocation
+                                            key={`${location.nodeId}:${location.engineType}:${location.model.name}`}
+                                            location={location}
+                                            node={node}
+                                            onCopy={onCopy}
+                                            onDelete={onDelete}
+                                        />
+                                    ) : (
+                                        []
+                                    )
+                                })}
                             </ul>
                         </div>
                     )

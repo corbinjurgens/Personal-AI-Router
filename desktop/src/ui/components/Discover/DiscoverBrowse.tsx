@@ -55,16 +55,16 @@ const CatalogRow = memo(function CatalogRow({
     selected: boolean
     onTarget: boolean
     inCluster: boolean
-    onSelect: (id: string) => void
+    onSelect: (model: ModelEntry) => void
 }) {
-    const facts = hubModelFacts(model.name, model.tags)
+    const facts = hubModelFacts(model.name, model.tags, model.parameterSize)
     return (
         <li>
             <button
                 type="button"
                 className="pair-list-item flex items-start gap-3 px-3 py-2.5 cursor-pointer"
                 aria-current={selected}
-                onClick={() => onSelect(model.id)}
+                onClick={() => onSelect(model)}
             >
                 <Monogram name={facts.title} size={34} />
                 <Stack gap="1" className="min-w-0 grow">
@@ -127,9 +127,12 @@ export function DiscoverBrowse({
 }) {
     const hub = useModelHubSearch('llama-cpp')
     const [sort, setSort] = useState<BrowseSort>('popular')
-    const [selectedId, setSelectedId] = useState<string | null>(null)
+    // Only a model the user picked gets a detail panel, so typing or re-sorting
+    // never lists another repository's files. The pick stays shown while the
+    // filter hides it from the list.
+    const [picked, setPicked] = useState<ModelEntry | null>(null)
     const sorted = useMemo(() => sortModels(hub.models, sort), [hub.models, sort])
-    const selected = sorted.find(model => model.id === selectedId) ?? sorted[0]
+    const selected = picked ? (sorted.find(model => model.id === picked.id) ?? picked) : undefined
 
     return (
         <div className="grid min-h-0 grow gap-4 grid-cols-1 md:grid-cols-[minmax(280px,2fr)_3fr]">
@@ -212,7 +215,7 @@ export function DiscoverBrowse({
                                     inCluster={
                                         holders.forRepo(hubModelFacts(model.name).repo).length > 0
                                     }
-                                    onSelect={setSelectedId}
+                                    onSelect={setPicked}
                                 />
                             ))}
                         </ul>

@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { Badge, Button, Flex, Stack, Tag, Text } from '@nvidia/foundations-react-core'
+import { Badge, Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { AdvertisedProfile, NodeRoles } from '@/shared/types/node-roles'
 import { EngineManagerNames } from '@/shared/constants/engines'
 import { engineLabel, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { ProfileIcon } from '@/ui/components/icons'
 import { Monogram } from '@/ui/components/Page/PagePrimitives'
+import { ModelIdentityTags } from '@/ui/components/ModelIdentity/ModelIdentityTags'
 import { hubModelFacts } from '@/ui/utils/hub-model-facts'
 import { ProfileDeploy } from '@/ui/components/ModelSettings/ModelSettingsCopy'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
@@ -30,13 +31,6 @@ function Spec({ label, value, title }: { label: string; value: string; title?: s
             </dd>
         </div>
     )
-}
-
-/** Context sizes as people say them: 65536 -> "64K". */
-function formatContext(value: string): string {
-    const tokens = Number(value)
-    if (value === 'Unknown' || !Number.isFinite(tokens)) return value
-    return tokens >= 1024 && tokens % 1024 === 0 ? `${tokens / 1024}K` : tokens.toLocaleString('en')
 }
 
 export function ProfileCard({
@@ -112,36 +106,16 @@ export function ProfileCard({
                     <Text kind="body/semibold/md" className="truncate" title={profile.key}>
                         {title}
                     </Text>
-                    <Flex
-                        align="center"
-                        gap="2"
-                        wrap="wrap"
-                        aria-label="Model identity"
-                        className="min-w-0"
-                    >
-                        {identity?.repository ? (
-                            <Text
-                                kind="body/regular/sm"
-                                className="text-subtle-color truncate min-w-0"
-                                title={served ? `Served as ${served}` : undefined}
-                            >
-                                {identity.repository}
-                            </Text>
-                        ) : (
-                            <Text
-                                kind="body/regular/sm"
-                                className="text-subtle-color truncate min-w-0"
-                                title="Served model ID"
-                            >
-                                {served ?? profile.key}
-                            </Text>
-                        )}
-                        {identity?.quantization && (
-                            <Tag color="green" density="compact" readOnly>
-                                {identity.quantization}
-                            </Tag>
-                        )}
-                    </Flex>
+                    {!identity?.repository && !identity?.generalName && (
+                        <Text
+                            kind="body/regular/sm"
+                            className="text-subtle-color truncate min-w-0"
+                            title="Served model ID"
+                        >
+                            {served ?? profile.key}
+                        </Text>
+                    )}
+                    <ModelIdentityTags identity={identity} withContext={false} hideUnknown />
                 </Stack>
                 <Text kind="body/regular/xs" className="text-subtle2 shrink-0 mt-1">
                     {engine ? engineLabel(engine, undefined) : profile.engine}
@@ -153,10 +127,14 @@ export function ProfileCard({
                 <dl className="grid grid-cols-3 gap-2 m-0">
                     <Spec
                         label="Context"
-                        value={formatContext(summary.context)}
-                        title={`${summary.context} tokens`}
+                        value={summary.context}
+                        title={
+                            summary.contextTokens === undefined
+                                ? undefined
+                                : `${summary.contextTokens.toLocaleString('en')} tokens`
+                        }
                     />
-                    <Spec label="GPU" value={summary.gpu.replace(/ GPU layers$/, ' layers')} />
+                    <Spec label="GPU" value={summary.gpu} />
                     <Spec label="Options" value={summary.extraOptions} title="Extra options" />
                 </dl>
             )}

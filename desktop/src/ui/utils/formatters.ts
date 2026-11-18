@@ -146,6 +146,11 @@ export function formatDownloadStatus(status: string, current: boolean | undefine
     }
 }
 
+/** A context size as people say it: 65536 -> "64K"; other sizes in full. */
+export function formatContextTokens(tokens: number): string {
+    return tokens >= 1024 && tokens % 1024 === 0 ? `${tokens / 1024}K` : tokens.toLocaleString('en')
+}
+
 /**
  * Short form of a reported service build for compact surfaces: `git:<sha>[+dirty]`
  * becomes the first eight hex digits plus any suffix. Other values are returned

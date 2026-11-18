@@ -3,6 +3,7 @@
 
 import type { ReactNode } from 'react'
 import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
+import type { NodeItem } from '@/shared/types/nodes'
 import { LocalBadge } from '@/ui/components/LocalBadge'
 
 /** Title, one-line description and page actions at the top of a content page. */
@@ -74,21 +75,19 @@ export function Monogram({ name, size = 36 }: { name: string; size?: number }) {
     )
 }
 
-/** A node name in a small pill with a status dot. */
+/** A node name in a small pill with a status dot that dims while the node is offline. */
 export function NodeChip({
-    name,
+    node,
     local = false,
-    offline = false,
     title
 }: {
-    name: string
+    node: NodeItem
     local?: boolean
-    offline?: boolean
     title?: string
 }) {
     return (
-        <span className="pair-node-chip" data-offline={offline} title={title}>
-            {name}
+        <span className="pair-node-chip" data-offline={node.status === 'offline'} title={title}>
+            {node.name}
             {local && <LocalBadge />}
         </span>
     )

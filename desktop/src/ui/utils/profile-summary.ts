@@ -4,11 +4,13 @@
 import type { ModelIdentity } from '@/shared/types/engines'
 import type { ModelLoad } from '@/shared/types/model-config'
 import type { AdvertisedProfile, NodeRoles } from '@/shared/types/node-roles'
+import { formatContextTokens } from '@/ui/utils/formatters'
 
 /**
  * Call with the profile's own node roles, never a cluster-wide role list.
  * `identity` is the served model's identity; its configured context is the
  * last fallback when the node's engine settings are not readable here.
+ * Labels are for the profile card: context reads "64K" and GPU "20 layers".
  */
 export function profileSummary(
     profile: AdvertisedProfile,
@@ -29,12 +31,13 @@ export function profileSummary(
             : load?.resolved?.gpu.mode === 'cpu' || requested?.gpu?.mode === 'cpu'
               ? 'CPU'
               : load?.resolved?.gpu.layers !== undefined
-                ? `${load.resolved.gpu.layers} GPU layers`
+                ? `${load.resolved.gpu.layers} layers`
                 : requested?.gpu?.mode === 'layers' && requested.gpu.layers !== undefined
-                  ? `${requested.gpu.layers} GPU layers`
+                  ? `${requested.gpu.layers} layers`
                   : 'Unknown'
     return {
-        context: context === undefined ? 'Unknown' : String(context),
+        context: context === undefined ? 'Unknown' : formatContextTokens(context),
+        contextTokens: context,
         gpu,
         extraOptions:
             requested === undefined
