@@ -524,6 +524,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	history := p.newRoutingHistory()
 	history.parent = ctx
 	defer cancel()
+	go clustertrust.DefaultPeerStats.Log(ctx, slog.Default(), 15*time.Minute)
 	historyDone := make(chan struct{})
 	go func() {
 		defer close(historyDone)

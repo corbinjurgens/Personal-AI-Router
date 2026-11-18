@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/buildapply"
@@ -177,6 +178,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	defer cancel()
+	go clustertrust.DefaultPeerStats.Log(ctx, slog.Default(), 15*time.Minute)
 	if mon, err := netmon.Watch(ctx); err != nil {
 		slog.Warn("network monitor unavailable", "err", err)
 	} else {

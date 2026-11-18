@@ -14,8 +14,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/netmon"
 	"nvpair-shared/nodeid"
 )
@@ -74,6 +76,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	go clustertrust.DefaultPeerStats.Log(ctx, slog.Default(), 15*time.Minute)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

@@ -49,7 +49,7 @@ func (d *daemon) runModelsStream(ctx context.Context, hostUUID string, id uint64
 		em, advertised := node.Services[noderec.ServiceEngineManager]
 		guardIP, emPort, guarded = node.IP, em.Port, found && advertised
 		up := d.streamPeerOnce(hostUUID, noderec.ServiceEngineManager, func(client *http.Client, current func() bool, node noderec.DirectoryNode, host string, port int) (time.Duration, bool) {
-			return d.readModelsStream(ctx, client, current, hostUUID, node.IP, host, port, id)
+			return d.readModelsStream(ctx, client, current, hostUUID, node.ClusterUUID, node.IP, host, port, id)
 		})
 		d.dropModelsLive(hostUUID, id)
 		if guarded && ctx.Err() == nil {
@@ -104,7 +104,7 @@ func (d *daemon) dropModelsLive(hostUUID string, id uint64) {
 // readModelsStream connects to one address and reads its models stream. Each
 // frame takes the successful-fetch path. guardIP is the node's canonical
 // address, the stale-result guard.
-func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, guardIP, host string, port int, id uint64) (up time.Duration, tryNext bool) {
+func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, peerUUID, guardIP, host string, port int, id uint64) (up time.Duration, tryNext bool) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	url := "https://" + net.JoinHostPort(host, strconv.Itoa(port)) + modelsStreamPath
@@ -114,6 +114,7 @@ func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, curr
 	}
 	defer resp.Body.Close()
 	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[modelInventory]{
+		Kind: "models", Peer: peerUUID,
 		Changed: d.peerChanged(),
 		Idle:    modelsStreamIdle,
 		MaxLine: modelsResponseBytes,

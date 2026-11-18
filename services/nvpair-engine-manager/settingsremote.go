@@ -424,6 +424,7 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) tim
 	}
 	defer response.Body.Close()
 	outcome, _ := clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
+		Kind: "settings", Peer: peer.clusterUUID,
 		Changed: m.changed,
 		Idle:    settingsStreamIdle,
 		MaxLine: 256 * 1024,

@@ -266,6 +266,7 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) ti
 	authority := p.streamAuthority(uuid, identity, current)
 	accepted := false
 	outcome, err := clustertrust.ReadSnapshotStream(ctx, cancel, resp.Body, clustertrust.SnapshotStreamClient[performanceFrame]{
+		Kind: "performance", Peer: uuid,
 		Changed: p.broadcaster.changed,
 		Idle:    performanceStreamIdle,
 		MaxLine: performanceStreamMaxLine,

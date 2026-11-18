@@ -385,6 +385,7 @@ func (d *daemon) announceLocked() {
 // run starts the _nvpair-node responder and browser, folding browse events into
 // the directory and emitting discovery:node-* until ctx is cancelled.
 func (d *daemon) run(ctx context.Context) {
+	go clustertrust.DefaultPeerStats.Log(ctx, slog.Default(), 15*time.Minute)
 	mon, err := netmon.Watch(ctx)
 	if err != nil {
 		slog.Warn("network monitor unavailable; advertised ip= is static", "err", err)

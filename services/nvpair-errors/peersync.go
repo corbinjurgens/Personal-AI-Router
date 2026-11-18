@@ -391,6 +391,7 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 	}
 	slog.Debug("errors stream connected", "nodeId", nodeID, "url", url)
 	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[errors.SyncEnvelope]{
+		Kind: "errors", Peer: target.uuid,
 		Changed: ps.changed,
 		Idle:    errorsStreamIdle,
 		MaxLine: jsonrpc.DefaultFrameBytes,

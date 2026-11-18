@@ -248,8 +248,8 @@ func connectPeerStream(ctx, streamCtx context.Context, cancel context.CancelFunc
 // runNodeInfoStream keeps one node-info stream to hostUUID open until ctx ends.
 func (d *daemon) runNodeInfoStream(ctx context.Context, hostUUID string, id uint64) {
 	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPeerStreamRetry(), Changed: d.peerChanged()}, func(ctx context.Context) (time.Duration, bool) {
-		up := d.streamPeerOnce(hostUUID, noderec.ServiceNodeInfo, func(client *http.Client, current func() bool, _ noderec.DirectoryNode, host string, port int) (time.Duration, bool) {
-			return d.readNodeInfoStream(ctx, client, current, hostUUID, host, port, id)
+		up := d.streamPeerOnce(hostUUID, noderec.ServiceNodeInfo, func(client *http.Client, current func() bool, node noderec.DirectoryNode, host string, port int) (time.Duration, bool) {
+			return d.readNodeInfoStream(ctx, client, current, hostUUID, node.ClusterUUID, host, port, id)
 		})
 		d.dropLiveNodeInfo(hostUUID, id)
 		return up, true
@@ -257,7 +257,7 @@ func (d *daemon) runNodeInfoStream(ctx context.Context, hostUUID string, id uint
 }
 
 // readNodeInfoStream connects to one address and reads its node-info stream.
-func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, host string, port int, id uint64) (up time.Duration, tryNext bool) {
+func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, peerUUID, host string, port int, id uint64) (up time.Duration, tryNext bool) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	url := "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + nodeInfoStreamPath
@@ -267,6 +267,7 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 	}
 	defer resp.Body.Close()
 	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[NodeInfoResponse]{
+		Kind: "node-info", Peer: peerUUID,
 		Changed: d.peerChanged(),
 		Idle:    nodeInfoStreamIdle,
 		MaxLine: nodeInfoStreamMaxLine,
