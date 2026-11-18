@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -175,23 +176,19 @@ func TestNodeInfoChangedReplay(t *testing.T) {
 	t.Logf("%d frames for %d samples", frames, samples)
 }
 
-// streamPublisher starts a publisher whose body reports one GPU at the given
+// streamPublisher starts a publisher whose sample reports one GPU at the given
 // utilization, with a 50 ms keepalive, both undone at cleanup.
 func streamPublisher(t *testing.T, utilization *atomic.Uint32) *nodeInfoPublisher {
 	t.Helper()
 	keepalive := nodeInfoStreamKeepalive
 	nodeInfoStreamKeepalive = 50 * time.Millisecond
 	t.Cleanup(func() { nodeInfoStreamKeepalive = keepalive })
-	pub := &nodeInfoPublisher{body: func() []byte {
-		body, err := json.Marshal(NodeInfoResponse{
+	pub := &nodeInfoPublisher{sample: func() NodeInfoResponse {
+		return NodeInfoResponse{
 			GPUs:           []GPUInfo{{Name: "GPU", VramBytes: 16 << 30, UtilizationPercent: ptr(utilization.Load())}},
 			TelemetryValid: true,
 			HostUUID:       "stream-host",
-		})
-		if err != nil {
-			t.Errorf("marshal body: %v", err)
 		}
-		return body
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -204,6 +201,48 @@ func streamPublisher(t *testing.T, utilization *atomic.Uint32) *nodeInfoPublishe
 		<-done
 	})
 	return pub
+}
+
+func TestNodeInfoPublisherEncodesOnlyPublishedSamples(t *testing.T) {
+	encode := marshalNodeInfoSample
+	t.Cleanup(func() { marshalNodeInfoSample = encode })
+	encodes := 0
+	marshalNodeInfoSample = func(sample NodeInfoResponse) ([]byte, error) {
+		encodes++
+		return encode(sample)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	samples := 0
+	publishedSample := baseNodeInfo()
+	pub := &nodeInfoPublisher{sample: func() NodeInfoResponse {
+		samples++
+		if samples == 5 {
+			cancel()
+		}
+		return publishedSample
+	}}
+	pub.run(ctx)
+	if samples != 5 || encodes != 1 {
+		t.Fatalf("samples = %d, encodes = %d, want 5 samples and 1 encode", samples, encodes)
+	}
+	updates, unsubscribe, ok := pub.hub.Subscribe()
+	if !ok {
+		t.Fatal("subscribe to published frame")
+	}
+	defer unsubscribe()
+	want, err := json.Marshal(publishedSample)
+	if err != nil {
+		t.Fatalf("marshal expected body: %v", err)
+	}
+	select {
+	case got := <-updates:
+		if !bytes.Equal(got, want) {
+			t.Fatal("published bytes differ from json.Marshal of the sample")
+		}
+	default:
+		t.Fatal("first sample was not published")
+	}
 }
 
 // streamLines reads NDJSON lines from body into a channel that closes at EOF.
