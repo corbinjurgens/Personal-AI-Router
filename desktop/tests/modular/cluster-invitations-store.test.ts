@@ -64,6 +64,41 @@ const joinRequest: JoinRequest = {
 
 describe('service-owned join requests', () => {
     const store = () => useClusterInvitationsStore.getState()
+    it('stops reading after the initial snapshot', async () => {
+        await store().initialize(initial())
+        await vi.advanceTimersByTimeAsync(15000)
+        expect(getJoinRequests).toHaveBeenCalledTimes(1)
+    })
+
+    it('retries a failed read until a successful snapshot', async () => {
+        getJoinRequests.mockRejectedValueOnce(new Error('unavailable'))
+        await store().initialize(initial())
+        await vi.advanceTimersByTimeAsync(MODULAR_INVITE_STATUS_POLL_INTERVAL_MS)
+        expect(getJoinRequests).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(15000)
+        expect(getJoinRequests).toHaveBeenCalledTimes(2)
+    })
+
+    it('stops retrying when a push follows a failed read', async () => {
+        getJoinRequests.mockRejectedValueOnce(new Error('unavailable'))
+        await store().initialize(initial())
+        await vi.advanceTimersByTimeAsync(0)
+        expect(getJoinRequests).toHaveBeenCalledTimes(1)
+        joinPush?.(joinBaseline)
+        await vi.advanceTimersByTimeAsync(15000)
+        expect(getJoinRequests).toHaveBeenCalledTimes(1)
+    })
+
+    it('reads once on reconnect and then stays fresh', async () => {
+        await store().initialize(initial())
+        await vi.advanceTimersByTimeAsync(0)
+        disconnectCallbacks.forEach(callback => callback())
+        await vi.advanceTimersByTimeAsync(15000)
+        expect(getJoinRequests).toHaveBeenCalledTimes(1)
+        connectCallbacks.forEach(callback => callback())
+        await vi.advanceTimersByTimeAsync(15000)
+        expect(getJoinRequests).toHaveBeenCalledTimes(2)
+    })
     const child: Invite = { ...invite, inviteId: 'child', pin: null }
     const outgoing: JoinRequest = {
         ...joinRequest,

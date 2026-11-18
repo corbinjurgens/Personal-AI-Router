@@ -114,6 +114,7 @@ interface ClusterInvitationsStore {
 
 let unsubs: Array<() => void> = []
 let joinRevision = 0
+let joinFresh = false
 let joinConnection = 0
 let joinRead: Promise<void> | null = null
 let joinTimer: ReturnType<typeof setInterval> | null = null
@@ -139,6 +140,7 @@ function preferJoin(previous: JoinRequest | undefined, request: JoinRequest): Jo
 }
 
 function receiveJoinSnapshot(snapshot: JoinRequestsSnapshot): void {
+    joinFresh = true
     joinRevision++
     useClusterInvitationsStore.setState(state => {
         const missing =
@@ -484,11 +486,13 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
                     receiveJoinSnapshot(snapshot)
             })
             .catch(() => {
-                if (connected && generation === currentGeneration && revision === joinRevision)
+                if (connected && generation === currentGeneration && revision === joinRevision) {
+                    joinFresh = false
                     set({
                         joinError:
                             'Join request status is unavailable. Joining could not be confirmed. Reconnect and check both devices before trying again.'
                     })
+                }
             })
             .finally(() => {
                 if (joinRead === request) joinRead = null
@@ -659,6 +663,7 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
 
     initialize: async initial => {
         generation++
+        joinFresh = false
         retiredJoinInvites.clear()
         joinConnection++
         joinRevision++
@@ -686,7 +691,9 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
         )
         void get().refreshJoinRequests()
         joinTimer = setInterval(
-            () => void get().refreshJoinRequests(),
+            () => {
+                if (!joinFresh) void get().refreshJoinRequests()
+            },
             MODULAR_INVITE_STATUS_POLL_INTERVAL_MS
         )
         unsubs.push(
@@ -742,6 +749,7 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             unsubs.push(
                 transport.onDisconnect(() => {
                     connected = false
+                    joinFresh = false
                     joinConnection++
                     joinRevision++
                     joinRead = null
@@ -883,6 +891,7 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
 
     cleanup: () => {
         generation++
+        joinFresh = false
         retiredJoinInvites.clear()
         joinConnection++
         joinRevision++
