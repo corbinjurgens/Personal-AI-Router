@@ -5,11 +5,15 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { EngineModels, ModelIdentity } from '@/shared/types/engines'
+import type { EngineModels, EngineProgress, ModelIdentity } from '@/shared/types/engines'
+import type { ModelDownloadEntry } from '@/shared/types/model-download'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi } from '@/ui/api/pair-api'
 import type { IEngineApi } from '@/ui/api/engine-api'
+import { engineProgressKey } from '@/shared/utils/engine-progress'
+import { engineTypeFromManagerName } from '@/shared/utils/engines'
+import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { ModelsView } from '@/ui/components/Models/ModelsView'
 import DiscoverView from '@/ui/components/Discover/DiscoverView'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
@@ -154,6 +158,70 @@ async function findFiles(text: string): Promise<void> {
     await act(async () => button('Find files').click())
 }
 
+const PULLED = 'owner/Model-GGUF:Q4_K_M'
+
+function pull(
+    phase: ModelDownloadEntry['phase'],
+    percent?: number,
+    reason?: ModelDownloadEntry['reason']
+): EngineProgress {
+    return {
+        nodeId: 'msi',
+        nodeName: 'MSI',
+        engineType: 'llama-cpp',
+        operation: 'pull',
+        model: PULLED,
+        status: phase,
+        percent,
+        downloadState: {
+            id: 'download-1',
+            engine: 'llamacpp',
+            model: PULLED,
+            phase,
+            blocksReadiness: phase !== 'complete',
+            percent,
+            reason
+        },
+        downloadStateCurrent: true
+    }
+}
+
+function setPull(item: EngineProgress): void {
+    act(() =>
+        useEngineProgressStore.setState({ progress: new Map([[engineProgressKey(item), item]]) })
+    )
+}
+
+async function openRepoFiles(): Promise<void> {
+    catalogFiles.mockResolvedValue({
+        repo: 'owner/Model-GGUF',
+        revision: 'a'.repeat(40),
+        files: [{ quantization: 'Q4_K_M', name: PULLED, sizeBytes: 400, shards: 1 }]
+    })
+    await openPage()
+    await openSource('Paste a link')
+    await findFiles('owner/Model-GGUF')
+}
+
+function quantizationRow(): HTMLElement {
+    const row = document.querySelector<HTMLElement>('[aria-label="Quantizations"] li')
+    if (!row) throw new Error('Missing quantization row')
+    return row
+}
+
+function transfers(): HTMLElement | null {
+    return document.querySelector<HTMLElement>('section[aria-label="Transfers"]')
+}
+
+/** The progress bar's reported value: null while it only shows activity. */
+function barValue(scope: HTMLElement, label: string): string | null {
+    const bar = scope.querySelector(
+        `[role="progressbar"][aria-label="Download progress for ${label}"]`
+    )
+    if (!bar) throw new Error(`Missing progress bar: ${label}`)
+    return bar.getAttribute('aria-valuenow')
+}
+
 beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal('CSS', { supports: () => false, escape: (value: string) => value })
@@ -246,6 +314,8 @@ afterEach(async () => {
     vi.unstubAllGlobals()
     useEngineModelsStore.setState({ models: new Map() })
     useEngineProgressStore.setState({ progress: new Map() })
+    usePendingActionsStore.setState({ pending: new Map() })
+    localStorage.clear()
 })
 
 describe('Discover page', () => {
@@ -362,30 +432,9 @@ describe('Discover page', () => {
                 }
             ]
         })
-        const msi = inventory('msi', [])
-        useEngineModelsStore.setState({
-            models: new Map([
-                [
-                    'msi:llama-cpp',
-                    {
-                        ...msi,
-                        downloadState: msi.downloadState && {
-                            ...msi.downloadState,
-                            entries: [
-                                {
-                                    id: 'other-engine',
-                                    engine: 'llamacpp-fork',
-                                    model: 'owner/Model-GGUF:Q4_K_M',
-                                    phase: 'in_progress',
-                                    blocksReadiness: true,
-                                    percent: 50
-                                }
-                            ]
-                        }
-                    }
-                ]
-            ])
-        })
+        const fork = engineTypeFromManagerName('llamacpp-fork')
+        if (!fork) throw new Error('Missing descriptor engine type')
+        setPull({ ...pull('in_progress', 50), engineType: fork })
         await openPage()
         await openSource('Paste a link')
         await findFiles('owner/Model-GGUF')
@@ -457,5 +506,66 @@ describe('Discover page', () => {
         expect(capabilities).toHaveBeenCalledWith(
             expect.objectContaining({ nodeId: 'joes', engine: 'llamacpp' })
         )
+    })
+})
+
+describe('Discover download progress', () => {
+    it('shows a starting bar on the clicked row and in the transfers panel at once', async () => {
+        pullModel.mockImplementation((engineType, nodeId, model) =>
+            usePendingActionsStore
+                .getState()
+                .begin({ command: 'pullModel', engineType, nodeId, model })
+        )
+        await openRepoFiles()
+        await act(async () => button('Download Q4_K_M').click())
+        const row = quantizationRow()
+        expect(barValue(row, 'Q4_K_M')).toBeNull()
+        expect(row.textContent).toContain('Starting download')
+        expect(button('Download Q4_K_M').disabled).toBe(true)
+        const panel = transfers()
+        if (!panel) throw new Error('Missing transfers panel')
+        expect(barValue(panel, PULLED)).toBeNull()
+        expect(panel.textContent).toContain('To MSI')
+    })
+
+    it('shows a queued download with a moving bar', async () => {
+        await openRepoFiles()
+        setPull(pull('queued'))
+        expect(barValue(quantizationRow(), 'Q4_K_M')).toBeNull()
+        expect(quantizationRow().textContent).toContain('Download queued')
+        const panel = transfers()
+        if (!panel) throw new Error('Missing transfers panel')
+        expect(panel.textContent).toContain('Download queued')
+    })
+
+    it('shows a running download with its measured percent', async () => {
+        await openRepoFiles()
+        setPull(pull('in_progress', 40))
+        expect(barValue(quantizationRow(), 'Q4_K_M')).toBe('40')
+        expect(quantizationRow().textContent).toContain('Downloading · 40%')
+        const panel = transfers()
+        if (!panel) throw new Error('Missing transfers panel')
+        expect(barValue(panel, PULLED)).toBe('40')
+        expect(panel.textContent).toContain('1 running')
+    })
+
+    it('keeps a failed download visible with its reason until dismissed', async () => {
+        await openRepoFiles()
+        setPull(pull('failed', undefined, 'progress_timeout'))
+        expect(quantizationRow().textContent).toContain(
+            'Download failed: it stopped making progress'
+        )
+        expect(button('Download Q4_K_M').disabled).toBe(false)
+        expect(button('Download Q4_K_M').textContent).toContain('Retry')
+        expect(transfers()?.textContent).toContain('Download failed: it stopped making progress')
+        await act(async () => button(`Dismiss ${PULLED}`).click())
+        expect(transfers()).toBeNull()
+    })
+
+    it('reports a finished download in the transfers panel', async () => {
+        await openRepoFiles()
+        setPull(pull('complete', 100))
+        expect(transfers()?.textContent).toContain('Download complete')
+        expect(transfers()?.textContent).toContain('0 running')
     })
 })

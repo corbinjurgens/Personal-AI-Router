@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ModelDownloadEntry } from '@/shared/types/model-download'
+
 /**
  * Utility functions for formatting data
  */
@@ -143,6 +145,32 @@ export function formatDownloadStatus(status: string, current: boolean | undefine
             return 'Download complete'
         default:
             return 'Download status unknown'
+    }
+}
+
+/** Why a download failed, in plain words, from its download-state reason code. */
+export function formatDownloadFailure(reason: ModelDownloadEntry['reason']): string {
+    switch (reason) {
+        case 'busy':
+            return 'the engine was busy with another download'
+        case 'capacity':
+            return 'too many downloads were already running'
+        case 'download_failed':
+            return 'the files could not be downloaded'
+        case 'interrupted':
+            return 'it was interrupted before it finished'
+        case 'progress_timeout':
+            return 'it stopped making progress'
+        case 'acceptance_unknown':
+            return 'the engine did not confirm it started'
+        case 'cleanup_unknown':
+            return 'partial files may not have been cleaned up'
+        case 'persistence_error':
+            return 'its state could not be saved'
+        case 'unsupported':
+            return 'this engine cannot download that model'
+        default:
+            return 'no reason was reported'
     }
 }
 

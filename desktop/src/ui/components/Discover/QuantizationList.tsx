@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { Badge, Button, Flex, ProgressBar, Stack, Tag, Text } from '@nvidia/foundations-react-core'
+import { Badge, Button, Flex, Stack, Tag, Text } from '@nvidia/foundations-react-core'
 import type { EngineCatalogFile } from '@/shared/types/engine-api'
 import type { ModelItem } from '@/shared/types/engines'
 import type { NodeItem } from '@/shared/types/nodes'
-import { engineManagerName } from '@/shared/utils/engines'
-import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
+import { engineProgressKey } from '@/shared/utils/engine-progress'
+import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
-import { formatBytes, formatDownloadStatus } from '@/ui/utils/formatters'
+import { formatBytes } from '@/ui/utils/formatters'
+import { isDownloadActive, listModelDownloads } from '@/ui/utils/model-downloads'
+import { DownloadProgress } from '@/ui/components/Models/DownloadProgress'
 import { isHubEntryDownloaded } from '@/ui/utils/match-downloaded-model'
 import { NodeChip } from '@/ui/components/Page/PagePrimitives'
 import { Download } from '@/ui/components/icons'
@@ -41,9 +43,11 @@ export function QuantizationList({
     onDownload: (name: string) => void
 }) {
     const [showAll, setShowAll] = useState(false)
-    const target = useEngineModelsStore(state => state.models.get(`${targetNodeId}:llama-cpp`))
+    const progress = useEngineProgressStore(state => state.progress)
     const pending = usePendingActionsStore(state => state.pending)
-    void pending
+    const downloads = new Map(
+        listModelDownloads(progress, pending.values()).map(download => [download.key, download])
+    )
     // The catalog names a plain quantization ("Q4_K_M"); some publishers label
     // that file with a prefix ("UD-Q4_K_M").
     const wanted = recommended?.toUpperCase()
@@ -65,21 +69,19 @@ export function QuantizationList({
                         { id: file.name },
                         downloadedModels
                     )
-                    const entry =
-                        target?.downloadStateCurrent === true
-                            ? target.downloadState?.entries.find(
-                                  row =>
-                                      row.engine === engineManagerName('llama-cpp') &&
-                                      row.model === file.name
-                              )
-                            : undefined
-                    const starting =
-                        usePendingActionsStore
-                            .getState()
-                            .getModelPending(targetNodeId, 'llama-cpp', file.name) !== undefined
-                    const pulling =
-                        starting || entry?.phase === 'queued' || entry?.phase === 'in_progress'
-                    const percent = entry?.phase === 'in_progress' ? entry.percent : undefined
+                    const download = downloads.get(
+                        engineProgressKey({
+                            nodeId: targetNodeId,
+                            engineType: 'llama-cpp',
+                            operation: 'pull',
+                            model: file.name
+                        })
+                    )
+                    const pulling = isDownloadActive(download)
+                    // Once the file is on the target its "On" note says so.
+                    const showDownload =
+                        download !== undefined &&
+                        !(onTarget && download.entry?.phase === 'complete')
                     const nodes = holders(file.quantization)
                     return (
                         <li
@@ -123,21 +125,12 @@ export function QuantizationList({
                                         ))}
                                     </Flex>
                                 )}
-                                {pulling && (
-                                    <Stack gap="1">
-                                        {percent !== undefined && (
-                                            <ProgressBar
-                                                size="small"
-                                                value={Math.min(100, Math.max(0, percent))}
-                                                aria-label={`Download progress for ${file.quantization}`}
-                                            />
-                                        )}
-                                        <Text kind="body/regular/xs" className="text-subtle-color">
-                                            {entry
-                                                ? `${formatDownloadStatus(entry.phase, true)}${percent !== undefined ? ` · ${Math.round(percent)}%` : ''}`
-                                                : 'Starting download'}
-                                        </Text>
-                                    </Stack>
+                                {showDownload && (
+                                    <DownloadProgress
+                                        label={file.quantization}
+                                        entry={download.entry}
+                                        starting={download.starting}
+                                    />
                                 )}
                             </Stack>
                             {onTarget ? (
@@ -155,7 +148,11 @@ export function QuantizationList({
                                     onClick={() => onDownload(file.name)}
                                 >
                                     <Download />
-                                    {pulling ? 'Downloading' : 'Download'}
+                                    {pulling
+                                        ? 'Downloading'
+                                        : download?.entry?.phase === 'failed'
+                                          ? 'Retry'
+                                          : 'Download'}
                                 </Button>
                             )}
                         </li>

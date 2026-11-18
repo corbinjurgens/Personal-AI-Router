@@ -448,11 +448,41 @@ describe('Models tab', () => {
             )
         })
         await act(async () => root.render(<ModelsView />))
-        const panel = container.querySelector('section[aria-label="Transfers in progress"]')
+        const panel = container.querySelector('section[aria-label="Transfers"]')
         const text = panel?.textContent ?? ''
-        expect(text).toContain('1 transfer')
+        expect(text).toContain('1 running')
         expect(text.match(/To MSI/g)).toHaveLength(1)
         expect(text).not.toContain('departed')
+    })
+
+    it('shows a queued download with a moving bar on the Models page', async () => {
+        const entry: ModelDownloadEntry = {
+            id: 'download-2',
+            engine: 'llamacpp',
+            model: 'owner/Queued-GGUF:Q4_K_M',
+            phase: 'queued',
+            blocksReadiness: true
+        }
+        const item: EngineProgress = {
+            nodeId: 'joes',
+            nodeName: 'Joes',
+            engineType: 'llama-cpp',
+            operation: 'pull',
+            model: entry.model,
+            status: entry.phase,
+            downloadState: entry,
+            downloadStateCurrent: true
+        }
+        useEngineProgressStore.setState({ progress: new Map([[engineProgressKey(item), item]]) })
+        await act(async () => root.render(<ModelsView />))
+        const panel = container.querySelector('section[aria-label="Transfers"]')
+        const bar = panel?.querySelector(
+            `[role="progressbar"][aria-label="Download progress for ${entry.model}"]`
+        )
+        expect(bar).not.toBeNull()
+        expect(bar?.getAttribute('aria-valuenow')).toBeNull()
+        expect(panel?.textContent).toContain('Download queued')
+        expect(panel?.textContent).toContain('To Joes')
     })
 
     it('dims the chips of an offline holder in the group header and its row', async () => {

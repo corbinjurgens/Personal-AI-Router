@@ -6,23 +6,40 @@ import { Button, Flex, ProgressBar, Stack, Text } from '@nvidia/foundations-reac
 import type { EngineProgress } from '@/shared/types/engines'
 import type { NodeItem } from '@/shared/types/nodes'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
+import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { useLocalStorageState } from '@/ui/hooks/useLocalStorageState'
 import { engineProgressKey } from '@/shared/utils/engine-progress'
-import { formatCopyProgressLabel, formatDownloadStatus } from '@/ui/utils/formatters'
+import { formatCopyProgressLabel } from '@/ui/utils/formatters'
+import {
+    isDownloadActive,
+    listModelDownloads,
+    type ModelDownload
+} from '@/ui/utils/model-downloads'
 import { Download, Layers } from '@/ui/components/icons'
+import { DownloadProgress } from './DownloadProgress'
+
+const DISMISSED_KEY = 'pair.transfers.dismissedDownloads'
+
+function parseDismissed(raw: unknown): string[] {
+    return Array.isArray(raw) ? raw.filter(item => typeof item === 'string') : []
+}
+
+/** A finished download is dismissed by its node and target-minted id. */
+function outcomeId(download: ModelDownload): string {
+    return `${download.nodeId}:${download.entry?.id ?? ''}`
+}
 
 function TransferRow({
     icon,
     model,
     route,
-    percent,
-    label,
+    status,
     action
 }: {
     icon: ReactNode
     model: string
     route: string
-    percent?: number
-    label: string
+    status: ReactNode
     action?: ReactNode
 }) {
     return (
@@ -37,23 +54,18 @@ function TransferRow({
                         {route}
                     </Text>
                 </Flex>
-                {percent !== undefined && (
-                    <ProgressBar
-                        size="small"
-                        value={Math.min(100, Math.max(0, percent))}
-                        aria-label={`Progress for ${model}`}
-                    />
-                )}
-                <Text kind="body/regular/xs" className="text-subtle-color">
-                    {percent !== undefined ? `${label} · ${Math.round(percent)}%` : label}
-                </Text>
+                {status}
             </Stack>
             {action}
         </Flex>
     )
 }
 
-/** Model downloads and copies currently running anywhere in the cluster. */
+/**
+ * Model downloads and copies anywhere in the cluster: running ones with their
+ * progress from the moment Download is clicked, and finished downloads with
+ * their outcome until the viewer dismisses them.
+ */
 export function TransfersPanel({
     nodesById,
     onViewCopy
@@ -63,53 +75,101 @@ export function TransfersPanel({
     onViewCopy: (item: EngineProgress) => void
 }) {
     const progress = useEngineProgressStore(state => state.progress)
-    const items = Array.from(progress.values())
-    const copies = items.filter(item => item.operation === 'copy')
-    // The progress store carries one pull entry per node, engine and model,
-    // projected from that node's current download state, so a download started
-    // elsewhere shows here too. Departed nodes are left out.
-    const downloads = items.filter(
-        item =>
-            item.operation === 'pull' &&
-            item.downloadStateCurrent === true &&
-            nodesById.has(item.nodeId) &&
-            (item.downloadState?.phase === 'queued' || item.downloadState?.phase === 'in_progress')
+    const pending = usePendingActionsStore(state => state.pending)
+    const [dismissed, setDismissed] = useLocalStorageState<string[]>(DISMISSED_KEY, [], {
+        parse: parseDismissed
+    })
+    const copies = Array.from(progress.values()).filter(item => item.operation === 'copy')
+    // Departed nodes are left out.
+    const downloads = listModelDownloads(progress, pending.values()).filter(download =>
+        nodesById.has(download.nodeId)
     )
-    const count = copies.length + downloads.length
-    if (count === 0) return null
+    const running = downloads.filter(isDownloadActive)
+    const finished = downloads.filter(
+        download => !isDownloadActive(download) && !dismissed.includes(outcomeId(download))
+    )
+    // Keep only ids the nodes still report, so the stored list stays bounded.
+    const dismiss = (ids: string[]) => {
+        const reported = new Set(downloads.map(outcomeId))
+        setDismissed(current => [...new Set([...current, ...ids])].filter(id => reported.has(id)))
+    }
+    const count = copies.length + running.length
+    if (count + finished.length === 0) return null
     const name = (id: string | undefined) => (id ? (nodesById.get(id)?.name ?? id) : '')
+    const downloadRow = (download: ModelDownload, finishedRow: boolean) => (
+        <TransferRow
+            key={download.key}
+            icon={<Download />}
+            model={download.model}
+            route={`To ${name(download.nodeId)}`}
+            status={
+                <DownloadProgress
+                    label={download.model}
+                    entry={download.entry}
+                    starting={download.starting}
+                />
+            }
+            action={
+                finishedRow && (
+                    <Button
+                        size="small"
+                        kind="tertiary"
+                        className="shrink-0"
+                        aria-label={`Dismiss ${download.model}`}
+                        onClick={() => dismiss([outcomeId(download)])}
+                    >
+                        Dismiss
+                    </Button>
+                )
+            }
+        />
+    )
     return (
         <section
             className="pair-paper p-4 shrink-0 max-h-56 overflow-y-auto"
-            aria-label="Transfers in progress"
+            aria-label="Transfers"
         >
             <Stack gap="3">
-                <Flex align="center" justify="between">
-                    <span className="pair-eyebrow">In progress</span>
-                    <Text kind="body/regular/xs" className="text-subtle-color">
-                        {count} {count === 1 ? 'transfer' : 'transfers'}
-                    </Text>
+                <Flex align="center" justify="between" gap="2">
+                    <span className="pair-eyebrow">Transfers</span>
+                    <Flex align="center" gap="2">
+                        <Text kind="body/regular/xs" className="text-subtle-color">
+                            {count} running
+                        </Text>
+                        {finished.length > 0 && (
+                            <Button
+                                size="small"
+                                kind="tertiary"
+                                onClick={() => dismiss(finished.map(outcomeId))}
+                            >
+                                Clear finished
+                            </Button>
+                        )}
+                    </Flex>
                 </Flex>
-                {downloads.map(item => (
-                    <TransferRow
-                        key={engineProgressKey(item)}
-                        icon={<Download />}
-                        model={item.model ?? ''}
-                        route={`To ${name(item.nodeId)}`}
-                        percent={
-                            item.downloadState?.phase === 'in_progress' ? item.percent : undefined
-                        }
-                        label={formatDownloadStatus(item.downloadState?.phase ?? 'unknown', true)}
-                    />
-                ))}
+                {running.map(download => downloadRow(download, false))}
                 {copies.map(item => (
                     <TransferRow
                         key={engineProgressKey(item)}
                         icon={<Layers />}
                         model={item.model ?? ''}
                         route={`${name(item.sourceNodeId)} to ${name(item.destinationNodeId ?? item.nodeId)}`}
-                        percent={item.percent}
-                        label={formatCopyProgressLabel(item)}
+                        status={
+                            <Stack gap="1">
+                                {item.percent !== undefined && (
+                                    <ProgressBar
+                                        size="small"
+                                        value={Math.min(100, Math.max(0, item.percent))}
+                                        aria-label={`Copy progress for ${item.model ?? ''}`}
+                                    />
+                                )}
+                                <Text kind="body/regular/xs" className="text-subtle-color">
+                                    {item.percent !== undefined
+                                        ? `${formatCopyProgressLabel(item)} · ${Math.round(item.percent)}%`
+                                        : formatCopyProgressLabel(item)}
+                                </Text>
+                            </Stack>
+                        }
                         action={
                             <Button
                                 size="small"
@@ -122,6 +182,7 @@ export function TransfersPanel({
                         }
                     />
                 ))}
+                {finished.map(download => downloadRow(download, true))}
             </Stack>
         </section>
     )
