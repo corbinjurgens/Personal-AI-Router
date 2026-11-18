@@ -290,6 +290,104 @@ func TestNodeInfoStreamSupersededFrameIsNotCached(t *testing.T) {
 	}
 }
 
+func TestNodeInfoStreamSupersededFrameEmitsNothing(t *testing.T) {
+	f := newStreamPeerFixture(t)
+	f.d.nodeInfoStreams.active = map[string]nodeInfoStreamHandle{"peer": {id: 8}}
+	stale := streamFixtureFrame("peer")
+	cluster := "superseded"
+	stale.ClusterUUID = &cluster
+	stale.ServiceBuildID = scannerDirtyBuild
+
+	f.d.applyNodeInfoFrame("peer", f.port, 7, stale, func() bool { return true })
+
+	f.noTelemetry(t, 100*time.Millisecond)
+	node, present := f.d.dir.get("peer")
+	if !present || node.ClusterUUID != f.node.ClusterUUID || node.Trusted != f.node.Trusted {
+		t.Fatalf("superseded frame changed cluster identity: %+v", node)
+	}
+	if node.ServiceBuildID != f.node.ServiceBuildID {
+		t.Fatalf("superseded frame changed build: %q", node.ServiceBuildID)
+	}
+}
+
+func TestNodeInfoStreamReplacementFencesConcurrentFrames(t *testing.T) {
+	f := newStreamPeerFixture(t)
+	fresh := streamFixtureFrame("peer")
+	fresh.GPUs = []GPUInfo{{UtilizationPercent: ptr(uint32(90))}}
+	fresh.ServiceBuildID = scannerCleanBuild
+	f.first.Store(&fresh)
+	f.d.nodeInfoStreams.nextID = 7
+	f.d.nodeInfoStreams.active = map[string]nodeInfoStreamHandle{"peer": {id: 7, cancel: func() {}}}
+	stale := streamFixtureFrame("peer")
+	stale.ClusterUUID = nil // Keep the peer admitted while replacement races.
+	stale.GPUs = []GPUInfo{{UtilizationPercent: ptr(uint32(10))}}
+	stale.ServiceBuildID = scannerDirtyBuild
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var streams, actions sync.WaitGroup
+	start := make(chan struct{})
+	replacementFrame := make(chan struct{})
+	oldDone, supervised := make(chan struct{}), make(chan struct{})
+	actions.Add(2)
+	t.Cleanup(func() { cancel(); actions.Wait(); streams.Wait() })
+	go func() {
+		defer actions.Done()
+		defer close(oldDone)
+		<-start
+		for range 32 {
+			f.d.applyNodeInfoFrame("peer", f.port, 7, stale, func() bool { return true })
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-replacementFrame:
+		}
+		// Deliver another old frame after the replacement is observable, so
+		// both possible winners of the admission/replacement race are covered.
+		cluster := "superseded"
+		stale.ClusterUUID = &cluster
+		f.d.applyNodeInfoFrame("peer", f.port, 7, stale, func() bool { return true })
+	}()
+	go func() {
+		defer actions.Done()
+		defer close(supervised)
+		<-start
+		f.d.dir.remove("peer")
+		f.d.supervisePeerStreams(ctx, f.d.selfHostUUID(), &streams)
+		f.d.dir.upsert(f.node)
+		f.d.supervisePeerStreams(ctx, f.d.selfHostUUID(), &streams)
+	}()
+	close(start)
+
+	for {
+		got, _ := f.nextTelemetry(t)
+		if got.GPUUtilizationPct == 90 {
+			break
+		}
+		if got.GPUUtilizationPct != 10 {
+			t.Fatalf("unexpected telemetry during replacement: %+v", got)
+		}
+	}
+	close(replacementFrame)
+	select {
+	case <-oldDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("superseded frame apply did not finish")
+	}
+	<-supervised
+	f.noTelemetry(t, 100*time.Millisecond)
+	// The telemetry write precedes cache and identity application. Wait for
+	// the stream lock before reading all of the replacement's effects.
+	entry, live := f.d.liveNodeInfo("peer", time.Now())
+	if !live || entry.streamID != 8 || entry.info.ServiceBuildID != fresh.ServiceBuildID {
+		t.Fatalf("replacement cache = %+v, live = %v", entry, live)
+	}
+	node, present := f.d.dir.get("peer")
+	if !present || node.ClusterUUID != f.node.ClusterUUID || !node.Trusted || node.ServiceBuildID != fresh.ServiceBuildID {
+		t.Fatalf("replacement identity/build overwritten: %+v", node)
+	}
+}
+
 func TestNodeInfoStreamIdleEndsStream(t *testing.T) {
 	shortenNodeInfoStreamIdle(t, 300*time.Millisecond)
 	f := newStreamPeerFixture(t)

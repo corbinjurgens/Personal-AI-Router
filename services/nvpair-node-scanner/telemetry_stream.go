@@ -44,6 +44,13 @@ const (
 // active, the model inventory in models) and the latest node-info frame of each
 // live stream. Zero-value ready.
 type nodeInfoStreamState struct {
+	// mu serializes handle replacement with the whole node-info frame apply.
+	// Acquire it before peerServicesMu, mesh lookups, d.dir.mu, infoMu and
+	// codec wgate. Telemetry's incarnation lookup releases the mesh lock before
+	// taking d.dir.mu; its build update releases d.dir.mu before infoMu.
+	// Identity's d.dir.mu -> mesh/trust lookup never calls back into scanner.
+	// Never acquire mu while holding those locks. Notify may block under mu,
+	// so broker backpressure also stalls supervision and live-cache reads.
 	mu     sync.Mutex
 	nextID uint64
 	active map[string]nodeInfoStreamHandle
@@ -289,6 +296,13 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 // applyNodeInfoFrame runs a frame through the pulled sample's apply path, caches
 // it for discovery:get-node-info, and applies the peer's reported membership.
 func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info NodeInfoResponse, current func() bool) {
+	s := &d.nodeInfoStreams
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stream, active := s.active[hostUUID]; !active || stream.id != id {
+		return
+	}
+
 	boot, clockErr := telemetryClock()
 	now := time.Now()
 	d.dir.mu.RLock()
@@ -300,17 +314,10 @@ func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info N
 	d.applyTelemetrySample(hostUUID, generation, buildTargetCurrent, false, port,
 		telemetrySample{info: info, startedAt: now, boot: boot, clockErr: clockErr})
 
-	s := &d.nodeInfoStreams
-	s.mu.Lock()
-	// A cancelled stream finishing its last frame must not replace the frame
-	// of the stream that superseded it.
-	if s.active[hostUUID].id == id {
-		if s.live == nil {
-			s.live = make(map[string]liveNodeInfo)
-		}
-		s.live[hostUUID] = liveNodeInfo{streamID: id, info: info, frameAt: now, lineAt: now, current: current}
+	if s.live == nil {
+		s.live = make(map[string]liveNodeInfo)
 	}
-	s.mu.Unlock()
+	s.live[hostUUID] = liveNodeInfo{streamID: id, info: info, frameAt: now, lineAt: now, current: current}
 
 	d.applyReportedClusterIdentity(hostUUID, info.ClusterUUID)
 }
