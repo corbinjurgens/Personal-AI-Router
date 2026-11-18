@@ -11,12 +11,43 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
 )
+
+func TestErrorsPeerStreamReconnectsAfterChange(t *testing.T) {
+	f := newErrorSyncFixtureRetry(t, time.Hour)
+	f.blocked.Store(true)
+	var mu sync.Mutex
+	ch := make(chan struct{})
+	f.ps.changed = func() <-chan struct{} { mu.Lock(); defer mu.Unlock(); return ch }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.ps.handleEvent(ctx, f.event)
+	deadline := time.Now().Add(time.Second)
+	for f.reverseCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if f.reverseCalls.Load() == 0 {
+		t.Fatal("first attempt did not finish setup")
+	}
+	f.blocked.Store(false)
+	mu.Lock()
+	close(ch)
+	ch = make(chan struct{})
+	mu.Unlock()
+	deadline = time.Now().Add(time.Second)
+	for f.reverseCalls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if f.reverseCalls.Load() != 2 {
+		t.Fatalf("reverse attempts = %d, want wake retry", f.reverseCalls.Load())
+	}
+}
 
 // managerForNode builds a manager with a fixed local node id and no
 // codec output consumer needed (we read state via snapshot accessors,

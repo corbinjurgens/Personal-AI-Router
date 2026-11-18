@@ -222,7 +222,7 @@ func (p *performanceRelay) syncStreams(ctx context.Context, active map[string]co
 
 // keepStream reads uuid's stream using the shared peer reconnect schedule.
 func (p *performanceRelay) keepStream(ctx context.Context, uuid string) {
-	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPerformanceStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPerformanceStreamRetry(), Changed: p.broadcaster.changed}, func(ctx context.Context) (time.Duration, bool) {
 		return p.consumeStream(ctx, uuid), true
 	})
 }
@@ -265,6 +265,7 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) ti
 	authority := p.streamAuthority(uuid, identity, current)
 	accepted := false
 	outcome, err := clustertrust.ReadSnapshotStream(ctx, cancel, resp.Body, clustertrust.SnapshotStreamClient[performanceFrame]{
+		Changed: p.broadcaster.changed,
 		Idle:    performanceStreamIdle,
 		MaxLine: performanceStreamMaxLine,
 		Current: current,

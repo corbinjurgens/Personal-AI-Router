@@ -17,6 +17,7 @@ import (
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/netmon"
 	"nvpair-shared/nodeid"
 )
 
@@ -117,6 +118,11 @@ func newStartupManager(codec *Codec, nodeID, clusterDir string) *Manager {
 // never receives" would be worse than a clear crash the supervisor logs.
 func startPeerSync(ctx context.Context, mgr *Manager, port int, mesh *clustertrust.Mesh, clusterDir string) {
 	peers := NewPeerSync(mgr, mesh, clusterDir)
+	if mon, err := netmon.Watch(ctx); err != nil {
+		slog.Warn("network monitor unavailable", "err", err)
+	} else {
+		peers.changed = mon.Changed
+	}
 	// Streams send the latest local-origin snapshot on connect, so publish one
 	// before the server starts, then again after every local change.
 	pub := newErrorsPublisher()

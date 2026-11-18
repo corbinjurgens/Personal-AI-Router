@@ -88,6 +88,42 @@ func performanceStreamServe(t *testing.T, f *performanceFixture, handler http.Ha
 	return stop
 }
 
+func TestPerformanceStreamReconnectsAfterChange(t *testing.T) {
+	f := newPerformanceFixture(t)
+	requests := make(chan struct{}, 4)
+	stop := performanceStreamServe(t, f, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		requests <- struct{}{}
+	}))
+	performanceAddPeer(f.manager)
+	var mu sync.Mutex
+	ch := make(chan struct{})
+	f.manager.broadcaster.changed = func() <-chan struct{} { mu.Lock(); defer mu.Unlock(); return ch }
+	previous := newPerformanceStreamRetry
+	newPerformanceStreamRetry = func() *clustertrust.PeerRetry {
+		return &clustertrust.PeerRetry{Initial: time.Hour, Cap: time.Hour, StableAfter: time.Second}
+	}
+	defer func() { newPerformanceStreamRetry = previous }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.manager.performance.keepStream(ctx, "uuid-peer") }()
+	defer func() { cancel(); stop(); performanceWaitDone(t, done) }()
+	select {
+	case <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("first performance attempt did not connect")
+	}
+	mu.Lock()
+	close(ch)
+	ch = make(chan struct{})
+	mu.Unlock()
+	select {
+	case <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("change did not reconnect performance stream")
+	}
+}
+
 // performancePeer is uuid-peer's own manager, whose stream handler serves
 // the summaries it publishes. Its clock is separate from the receiver's.
 type performancePeer struct {

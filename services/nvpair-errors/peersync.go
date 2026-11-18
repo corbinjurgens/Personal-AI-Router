@@ -80,6 +80,7 @@ type PeerSync struct {
 	// clients opens streams directly or over a reverse session. It has no total
 	// timeout, because a stream stays open.
 	clients    *clustertrust.PeerServiceClient
+	changed    func() <-chan struct{}
 	clusterDir string
 
 	// addrs remembers which of a peer's published addresses answered, so a
@@ -119,8 +120,16 @@ func NewPeerSync(mgr *Manager, mesh *clustertrust.Mesh, clusterDir string) *Peer
 	ps.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		BaseConfigDir: baseDir,
 		ResolveRoute:  ps.resolveRoute,
+		Changed:       ps.peerChanges,
 	})
 	return ps
+}
+
+func (ps *PeerSync) peerChanges() <-chan struct{} {
+	if ps.changed == nil {
+		return nil
+	}
+	return ps.changed()
 }
 
 // resolveRoute uses shared admission authority at every adapter authorization
@@ -297,7 +306,7 @@ func (ps *PeerSync) stopStreams() {
 
 // runStream keeps one stream open using the shared peer reconnect schedule.
 func (ps *PeerSync) runStream(ctx context.Context, nodeID string, stream uint64) {
-	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newErrorsStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newErrorsStreamRetry(), Changed: ps.changed}, func(ctx context.Context) (time.Duration, bool) {
 		return ps.streamOnce(ctx, nodeID, stream), true
 	})
 }
@@ -373,6 +382,7 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 	}
 	slog.Debug("errors stream connected", "nodeId", nodeID, "url", url)
 	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[errors.SyncEnvelope]{
+		Changed: ps.changed,
 		Idle:    errorsStreamIdle,
 		MaxLine: jsonrpc.DefaultFrameBytes,
 		// The route carries admission, both certificates and the endpoint, so

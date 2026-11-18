@@ -149,6 +149,7 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
 	m.performance.streams = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		BaseConfigDir: peerConfigBase(clusterDir),
 		ResolveRoute:  m.broadcaster.resolveRoute,
+		Changed:       m.broadcaster.peerChanges,
 	})
 	m.server.performance = m.performance
 	return m

@@ -53,6 +53,7 @@ type Broadcaster struct {
 	peers   *peerSet
 	mesh    *clustertrust.Mesh
 	clients *clustertrust.PeerServiceClient
+	changed func() <-chan struct{}
 	addrs   *reach.Chooser
 }
 
@@ -66,6 +67,7 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
 		BaseConfigDir:     peerConfigBase(clusterDir),
 		ResolveRoute:      b.resolveRoute,
+		Changed:           b.peerChanges,
 		// Only post uses this client: nonempty, known-length event/cancel
 		// POSTs whose receiver owns deduplication. The adapter never replays.
 		ReuseConnections: true,
@@ -80,6 +82,13 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 	}
 	peers.mu.Unlock()
 	return b
+}
+
+func (b *Broadcaster) peerChanges() <-chan struct{} {
+	if b.changed == nil {
+		return nil
+	}
+	return b.changed()
 }
 
 // peerConfigBase is the configuration directory peer service clients use for

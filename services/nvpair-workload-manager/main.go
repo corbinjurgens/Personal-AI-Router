@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/netmon"
 	"nvpair-shared/nodeid"
 )
 
@@ -87,6 +88,11 @@ func main() {
 
 	codec := NewCodec(transport)
 	mgr := NewManager(codec, *port, selfUUID, *clusterDir)
+	if mon, err := netmon.Watch(ctx); err != nil {
+		slog.Warn("network monitor unavailable", "err", err)
+	} else {
+		mgr.broadcaster.changed = mon.Changed
+	}
 
 	if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("workload-manager error: %v", err)
