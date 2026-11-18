@@ -109,12 +109,18 @@ function writeIfChanged(file: string, contents: string): void {
     fs.writeFileSync(file, contents)
 }
 
+function pathContainsDir(pathValue: string | undefined, dir: string): boolean {
+    const normalize = (value: string) => value.trim().replace(/\\+$/, '').toLowerCase()
+    return (pathValue ?? '').split(';').some(entry => normalize(entry) === normalize(dir))
+}
+
 /**
  * Append `dir` to the current user's PATH (HKCU) via PowerShell, idempotently.
  * `[Environment]::SetEnvironmentVariable(..., 'User')` persists it and broadcasts
  * WM_SETTINGCHANGE so new shells pick it up without a reboot.
  */
 function addToWindowsUserPath(dir: string): void {
+    if (pathContainsDir(process.env.PATH, dir)) return
     const escaped = dir.replace(/'/g, "''")
     const script = [
         `$d = '${escaped}'`,
@@ -128,7 +134,7 @@ function addToWindowsUserPath(dir: string): void {
     execFile(
         'powershell',
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-        { env: removeProviderSecrets(process.env) },
+        { env: removeProviderSecrets(process.env), windowsHide: true },
         err => {
             if (err) {
                 log.warn({
