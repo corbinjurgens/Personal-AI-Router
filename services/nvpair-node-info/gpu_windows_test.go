@@ -6,9 +6,50 @@
 package main
 
 import (
+	"syscall"
 	"testing"
 	"unsafe"
 )
+
+type testDXGIFactory struct {
+	vtbl     *[64]uintptr
+	current  bool
+	releases int
+}
+
+func newTestDXGIFactory() *testDXGIFactory {
+	factory := &testDXGIFactory{vtbl: new([64]uintptr), current: true}
+	factory.vtbl[vtblIDXGIFactory1IsCurrent] = syscall.NewCallback(func(uintptr) uintptr {
+		if factory.current {
+			return 1
+		}
+		return 0
+	})
+	factory.vtbl[vtblIUnknownRelease] = syscall.NewCallback(func(uintptr) uintptr {
+		factory.releases++
+		return 0
+	})
+	return factory
+}
+
+func TestIsCurrent(t *testing.T) {
+	t.Run("missing factory requires detection", func(t *testing.T) {
+		if isCurrent(nil) {
+			t.Fatal("nil factory reported current")
+		}
+	})
+	test := func(name string, current bool) {
+		t.Run(name, func(t *testing.T) {
+			factory := newTestDXGIFactory()
+			factory.current = current
+			if got := isCurrent(unsafe.Pointer(factory)); got != current {
+				t.Fatalf("IsCurrent = %v, want %v", got, current)
+			}
+		})
+	}
+	test("unchanged adapters return true", true)
+	test("changed adapters return false", false)
+}
 
 // TestDXGIAdapterDesc1Size pins the in-Go layout of dxgiAdapterDesc1 to the
 // C ABI's DXGI_ADAPTER_DESC1 size on amd64/arm64 Windows (8-byte SIZE_T).
