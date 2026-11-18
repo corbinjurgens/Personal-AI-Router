@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
     Badge,
     Button,
@@ -101,7 +101,6 @@ export default function ServiceSettings() {
     const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState<string | null>(null)
     const [logLevel, setLogLevel] = useState<ModularLogLevel>(MODULAR_DEFAULT_LOG_LEVEL)
-    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const [startingDemo, setStartingDemo] = useState(false)
     const setActiveTab = useOverviewUiStore(state => state.setActiveTab)
     const demoStatus = useInferenceDemoStore(state => state.state.status)
@@ -118,15 +117,9 @@ export default function ServiceSettings() {
 
     useEffect(() => {
         fetchStatus()
-        pollRef.current = setInterval(fetchStatus, 3000)
-        return () => {
-            if (pollRef.current) clearInterval(pollRef.current)
-        }
     }, [fetchStatus, connected])
 
-    // Reflect status changes the instant they happen (e.g. an unexpected broker
-    // crash flips the connector to disconnected) rather than waiting for the
-    // next 3s poll. The poll above remains as a fallback.
+    // Pushes carry status updates. The read on mount or reconnect fills the first value.
     useEffect(() => {
         if (!isElectron) return
         return window.windowApi.service.onStatusChanged(setStatus)
