@@ -157,6 +157,10 @@ func first(ctx context.Context, dial DialFunc, candidates []string, timeout time
 // discovery cycle, so recovery still needs no explicit Forget.
 const UnconfirmedCooldown = 5 * time.Second
 
+// SuspectFor is how long an address reported failed by ForgetAddr is tried
+// last, unless a network change clears it first.
+const SuspectFor = 10 * time.Minute
+
 // choice is the address chosen for a node plus the candidate list it was chosen
 // from. The fingerprint is how a republished list is noticed at all; what happens
 // then depends on whether the address survived it (see reuse).
@@ -217,6 +221,8 @@ type Chooser struct {
 	// expires, and the failure that would have retired it has already been
 	// reported.
 	generation map[string]uint64
+	suspect    map[string]map[string]time.Time
+	clock      func() time.Time
 }
 
 // Option adjusts a Chooser at construction.
@@ -240,6 +246,7 @@ func NewChooser(opts ...Option) *Chooser {
 		cache:      make(map[string]choice),
 		probing:    make(map[string]bool),
 		generation: make(map[string]uint64),
+		suspect:    make(map[string]map[string]time.Time),
 	}
 	for _, o := range opts {
 		o(c)
@@ -319,7 +326,8 @@ func (c *Chooser) ChooseWithin(ctx context.Context, key string, candidates []str
 	generation := c.generation[key]
 	c.mu.Unlock()
 
-	address, ok := first(ctx, c.dial, candidates, c.timeout)
+	ordered := c.ordered(key, candidates)
+	address, ok := first(ctx, c.dial, ordered, c.timeout)
 	return c.remember(ctx, key, candidates, fingerprint, address, ok, generation)
 }
 
@@ -331,7 +339,7 @@ func (c *Chooser) ChooseWithin(ctx context.Context, key string, candidates []str
 // replacement; releasing it here regardless would clear that replacement's
 // registration and let a third probe start alongside it.
 func (c *Chooser) confirm(key string, candidates []string, fingerprint string, generation uint64) {
-	address, ok := first(context.Background(), c.dial, candidates, c.timeout)
+	address, ok := first(context.Background(), c.dial, c.ordered(key, candidates), c.timeout)
 	c.remember(context.Background(), key, candidates, fingerprint, address, ok, generation)
 	c.mu.Lock()
 	if c.generation[key] == generation {
@@ -390,6 +398,8 @@ func (c *Chooser) remember(ctx context.Context, key string, candidates []string,
 }
 
 // Forget drops the remembered address for key so the next call confirms again.
+// Prefer ForgetAddr when the failed address is known, so a late failure does not
+// retire a newer choice and the failed address is tried last.
 // Callers invoke it when a connection to the chosen address fails: that failure is
 // the evidence which retires the answer, and without it a node whose network moved
 // would keep being dialed at an address that no longer works.
@@ -401,8 +411,58 @@ func (c *Chooser) remember(ctx context.Context, key string, candidates []string,
 // the address that probe is busy confirming.
 func (c *Chooser) Forget(key string) {
 	c.mu.Lock()
+	c.forget(key)
+	c.mu.Unlock()
+}
+
+// forget retires the current answer. The caller holds c.mu.
+func (c *Chooser) forget(key string) {
 	delete(c.cache, key)
 	delete(c.probing, key)
 	c.generation[key]++
-	c.mu.Unlock()
+}
+
+func (c *Chooser) now() time.Time {
+	if c.clock != nil {
+		return c.clock()
+	}
+	return time.Now()
+}
+
+// ForgetAddr reports that a connection to address failed at the application
+// layer. It retires the choice only if it is still address. Either way address
+// becomes suspect for key for SuspectFor.
+func (c *Chooser) ForgetAddr(key, address string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.cache[key]; !ok || e.address == address {
+		c.forget(key)
+	}
+	if c.suspect == nil {
+		c.suspect = make(map[string]map[string]time.Time)
+	}
+	if c.suspect[key] == nil {
+		c.suspect[key] = make(map[string]time.Time)
+	}
+	c.suspect[key][address] = c.now().Add(SuspectFor)
+}
+
+// ordered returns a copy, keeping suspect addresses last without changing the
+// publisher's relative order within either group.
+func (c *Chooser) ordered(key string, candidates []string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	ordered := make([]string, 0, len(candidates))
+	for _, address := range candidates {
+		if !now.Before(c.suspect[key][address]) {
+			ordered = append(ordered, address)
+		}
+	}
+	for _, address := range candidates {
+		if now.Before(c.suspect[key][address]) {
+			ordered = append(ordered, address)
+		}
+	}
+	return ordered
 }

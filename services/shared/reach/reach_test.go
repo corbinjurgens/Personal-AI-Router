@@ -767,3 +767,49 @@ func TestChooseIsConcurrencySafe(t *testing.T) {
 		t.Fatalf("Choose = %q, want the accepting address", got)
 	}
 }
+
+func TestForgetAddrRetiresOnlyTheFailedChoice(t *testing.T) {
+	f := newFakeNet("first", "second")
+	c := NewChooser(WithDial(f.dial))
+	candidates := []string{"first", "second"}
+	if got := choose(c, "peer", candidates); got != "first" {
+		t.Fatalf("initial choice = %q", got)
+	}
+	c.ForgetAddr("peer", "first")
+	if got := choose(c, "peer", candidates); got != "second" {
+		t.Fatalf("choice after failure = %q, want second", got)
+	}
+	before := f.dials.Load()
+	c.ForgetAddr("peer", "first")
+	if got := choose(c, "peer", candidates); got != "second" {
+		t.Fatalf("late failure replaced newer choice with %q", got)
+	}
+	if got := f.dials.Load(); got != before {
+		t.Fatalf("late failure caused %d probes", got-before)
+	}
+}
+
+func TestSuspectAddressExpires(t *testing.T) {
+	f := newFakeNet("first", "second")
+	c := NewChooser(WithDial(f.dial))
+	now := time.Now()
+	c.clock = func() time.Time { return now }
+	c.ForgetAddr("peer", "first")
+	candidates := []string{"first", "second"}
+	if got := choose(c, "peer", candidates); got != "second" {
+		t.Fatalf("suspect ordering chose %q, want second", got)
+	}
+	now = now.Add(SuspectFor)
+	c.Forget("peer")
+	if got := choose(c, "peer", candidates); got != "first" {
+		t.Fatalf("expired suspect ordering chose %q, want first", got)
+	}
+}
+
+func TestSuspectAddressRemainsAFallback(t *testing.T) {
+	c := NewChooser(WithDial(newFakeNet("first").dial))
+	c.ForgetAddr("peer", "first")
+	if got := choose(c, "peer", []string{"first", "refuses"}); got != "first" {
+		t.Fatalf("choice = %q, want accepting suspect address", got)
+	}
+}
