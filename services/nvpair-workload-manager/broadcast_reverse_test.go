@@ -60,6 +60,66 @@ func TestBroadcastLateFailureKeepsNewerAddress(t *testing.T) {
 	}
 }
 
+func TestPinnedWorkloadPostKeepsAddressAcrossPromotion(t *testing.T) {
+	f := newWorkloadReverseFixture(t, nil)
+	b := f.m.broadcaster
+	n := f.node
+	n.Addresses = []string{"192.168.1.2", "127.0.0.1"}
+	f.m.peers.Replace([]PeerNode{n})
+	peer, _, ok := f.m.peers.targetUUID("uuid-peer")
+	if !ok {
+		t.Fatal("published peer is missing")
+	}
+	lan, captured := peer.candidates[0], peer.candidates[1]
+	var lanReady atomic.Bool
+	b.addrs = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
+		if address == lan && !lanReady.Load() {
+			return nil, net.ErrClosed
+		}
+		return net.DialTimeout(network, f.endpoint, timeout)
+	}), reach.WithVerify(func(ctx context.Context, _, _ string) error {
+		return b.mesh.VerifyPeerAddress(ctx, peer.uuid, f.endpoint)
+	}))
+	f.configure(func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != captured {
+			t.Errorf("dial address = %q, want captured %q", address, captured)
+			return nil, net.ErrClosed
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, f.endpoint)
+	}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if got := b.addrs.ChooseWithin(ctx, peer.id, peer.candidates); got != captured {
+		t.Fatalf("initial choice = %q, want %q", got, captured)
+	}
+	url := "https://" + captured + eventsPath
+	lanReady.Store(true)
+	for b.addrs.Prefer(peer.id, peer.candidates) != lan {
+		select {
+		case <-ctx.Done():
+			t.Fatal("verified route was not promoted")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	client := b.clients.Client(peer.uuid, noderec.ServiceWorkload)
+	frame := reverseLifecycleFrame(t)
+	if err := b.post(ctx, client, url, frame); err != nil {
+		t.Fatalf("pinned post could not use its still-published address after promotion: %v", err)
+	}
+	if f.emitted.Load() != 1 || f.directDials.Load() != 1 || f.reverseDials.Load() != 0 {
+		t.Fatalf("events/direct/reverse = %d/%d/%d, want 1/1/0", f.emitted.Load(), f.directDials.Load(), f.reverseDials.Load())
+	}
+	n.Addresses = n.Addresses[:1]
+	f.m.peers.Replace([]PeerNode{n})
+	if err := b.post(ctx, client, url, frame); err == nil {
+		t.Fatal("pinned post used an unpublished address")
+	}
+	if f.directDials.Load() != 1 || f.reverseDials.Load() != 0 {
+		t.Fatal("unpublished address was dialed")
+	}
+}
+
 type workloadReverseFixture struct {
 	m             *Manager
 	receiver      *Server
@@ -184,7 +244,7 @@ func (f *workloadReverseFixture) configure(direct func(context.Context, string, 
 	f.m.broadcaster.clients.CloseIdle()
 	f.m.broadcaster.clients = clustertrust.NewPeerServiceClient(f.m.mesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
-		BaseConfigDir:     filepath.Dir(f.dir), ResolveRoute: f.m.broadcaster.resolveRoute,
+		BaseConfigDir:     filepath.Dir(f.dir), ResolveRouteForAddress: f.m.broadcaster.resolveRoute,
 		DirectTimeout:    50 * time.Millisecond,
 		ReuseConnections: true,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {

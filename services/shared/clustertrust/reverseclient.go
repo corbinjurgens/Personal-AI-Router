@@ -35,9 +35,13 @@ type PeerServiceClientOptions struct {
 	PeerClientOptions
 	BaseConfigDir string
 	ResolveRoute  func(string, noderec.ServiceKey) (PeerServiceRoute, bool)
-	DirectTimeout time.Duration
-	ProbeInterval time.Duration
-	Changed       func() <-chan struct{}
+	// ResolveRouteForAddress validates the request's captured address against
+	// live publication and admission at every authorization boundary. Owners
+	// whose selection can change independently of publication use this resolver.
+	ResolveRouteForAddress func(string, noderec.ServiceKey, string) (PeerServiceRoute, bool)
+	DirectTimeout          time.Duration
+	ProbeInterval          time.Duration
+	Changed                func() <-chan struct{}
 	// ReuseConnections opts into pooling for receiver-deduplicated POSTs with
 	// a nonempty, known-length body. Other request shapes keep fresh connections.
 	// GetBody is withheld from net/http during dispatch, even with idempotency
@@ -183,14 +187,21 @@ type peerServiceTransport struct {
 	key   peerServiceKey
 }
 
-func (p *PeerServiceClient) authority(key peerServiceKey) (peerServiceIdentity, *tls.Config, error) {
+func (p *PeerServiceClient) authority(key peerServiceKey, address string) (peerServiceIdentity, *tls.Config, error) {
 	fail := func() (peerServiceIdentity, *tls.Config, error) {
 		return peerServiceIdentity{}, nil, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: errors.New("peer service is not currently admitted")}
 	}
-	if p.opts.ResolveRoute == nil || !reverseServiceAllowed(key.service) {
+	if !reverseServiceAllowed(key.service) {
 		return fail()
 	}
-	route, ok := p.opts.ResolveRoute(key.uuid, key.service)
+	var route PeerServiceRoute
+	var ok bool
+	switch {
+	case p.opts.ResolveRouteForAddress != nil:
+		route, ok = p.opts.ResolveRouteForAddress(key.uuid, key.service, address)
+	case p.opts.ResolveRoute != nil:
+		route, ok = p.opts.ResolveRoute(key.uuid, key.service)
+	}
 	if !ok || route.Incarnation == "" || route.Address == "" {
 		return fail()
 	}
@@ -211,7 +222,7 @@ func (p *PeerServiceClient) authority(key peerServiceKey) (peerServiceIdentity, 
 }
 
 func (p *PeerServiceClient) current(key peerServiceKey, identity peerServiceIdentity) error {
-	now, _, err := p.authority(key)
+	now, _, err := p.authority(key, identity.route.Address)
 	if err != nil || now != identity {
 		p.mu.Lock()
 		if h := p.entries[key]; h != nil && h.identity == identity {
@@ -330,7 +341,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	if err := reverseDialContextError(req.Context()); err != nil {
 		return nil, err
 	}
-	identity, cfg, err := p.authority(key)
+	identity, cfg, err := p.authority(key, req.URL.Host)
 	if err != nil {
 		p.mu.Lock()
 		if h := p.entries[key]; h != nil {

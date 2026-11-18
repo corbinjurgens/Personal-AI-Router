@@ -6,6 +6,7 @@ package main
 import (
 	"net"
 	"net/http"
+	"slices"
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
@@ -36,7 +37,7 @@ type proxyPeerDispatch struct {
 
 func (d proxyPeerDispatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Context().Err() == nil {
-		if endpoint, ok := d.facade.peerEndpoint(d.uuid); ok && endpoint.nodeID == d.nodeID {
+		if endpoint, ok := d.facade.peerEndpoint(d.uuid); ok && endpoint.nodeID == d.nodeID && slices.Contains(endpoint.addresses, req.URL.Host) {
 			d.facade.targets.Prefer(d.nodeID, endpoint.addresses)
 		}
 	}
@@ -72,7 +73,7 @@ func (p *Proxy) peerServiceClient() *clustertrust.PeerServiceClient {
 	if p.peerServices == nil {
 		p.peerServices = clustertrust.NewPeerServiceClient(p.mesh, clustertrust.PeerServiceClientOptions{
 			PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: proxyResponseTimeout},
-			BaseConfigDir:     p.baseConfigDir, ResolveRoute: p.resolvePeerServiceRoute,
+			BaseConfigDir:     p.baseConfigDir, ResolveRouteForAddress: p.resolvePeerServiceRoute,
 			Changed: p.peerChanges,
 		})
 	}
@@ -86,7 +87,7 @@ func (p *Proxy) peerChanges() <-chan struct{} {
 	return p.mon.Changed()
 }
 
-func (p *Proxy) resolvePeerServiceRoute(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+func (p *Proxy) resolvePeerServiceRoute(uuid string, service noderec.ServiceKey, address string) (clustertrust.PeerServiceRoute, bool) {
 	if p.mesh == nil {
 		return clustertrust.PeerServiceRoute{}, false
 	}
@@ -98,10 +99,10 @@ func (p *Proxy) resolvePeerServiceRoute(uuid string, service noderec.ServiceKey)
 	for _, f := range p.enabledFacades() {
 		if f.profile.DiscoveryService == service {
 			endpoint, ok := f.peerEndpoint(uuid)
-			if !ok {
+			if !ok || !slices.Contains(endpoint.addresses, address) {
 				return clustertrust.PeerServiceRoute{}, false
 			}
-			return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: endpoint.selected,
+			return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: address,
 				Protocol: clustertrust.ReverseTLS, Generation: endpoint.generation}, true
 		}
 	}

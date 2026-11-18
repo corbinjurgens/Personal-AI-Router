@@ -137,7 +137,7 @@ func newProxyReverseFixtureFor(t *testing.T, profile engineProfile, handler http
 	}
 	f.p.peerServices = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: proxyResponseTimeout},
-		BaseConfigDir:     filepath.Dir(f.selfDir), ResolveRoute: f.p.resolvePeerServiceRoute,
+		BaseConfigDir:     filepath.Dir(f.selfDir), ResolveRouteForAddress: f.p.resolvePeerServiceRoute,
 		DirectTimeout: 100 * time.Millisecond,
 		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
 			f.directCalls.Add(1)
@@ -772,6 +772,85 @@ func TestProxyReverseDirectPrefersConfirmedPublishedAddress(t *testing.T) {
 	proxyReverseRoundTrip(t, f.p.candidateTransport(c), c.url.String())
 	if f.directCalls.Load() != 1 || f.reverseCalls.Load() != 0 {
 		t.Fatalf("multi-address direct/reverse = %d/%d, want 1/0", f.directCalls.Load(), f.reverseCalls.Load())
+	}
+}
+
+func TestPinnedProxyRequestKeepsAddressAcrossPromotion(t *testing.T) {
+	for _, duringSetup := range []bool{false, true} {
+		name := "before transport resolution"
+		if duringSetup {
+			name = "during transport authorization"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			f.directHealthy.Store(true)
+			facade := f.p.soleFacade()
+			n := f.node
+			n.Addresses = []string{"192.168.1.2", n.Addresses[0]}
+			addresses := nodeCandidates(n)
+			captured, lan := addresses[0], addresses[1]
+			var lanReady atomic.Bool
+			allowVerify := make(chan struct{})
+			releaseVerifier := sync.OnceFunc(func() { close(allowVerify) })
+			t.Cleanup(releaseVerifier)
+			facade.targets = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
+				if address == lan && !lanReady.Load() {
+					return nil, net.ErrClosed
+				}
+				return net.DialTimeout(network, captured, timeout)
+			}), reach.WithVerify(func(ctx context.Context, _, _ string) error {
+				select {
+				case <-allowVerify:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				return f.p.mesh.VerifyPeerAddress(ctx, n.ClusterUUID, captured)
+			}))
+			if got := facade.targets.ChooseWithin(context.Background(), n.ID, addresses); got != captured {
+				t.Fatalf("initial choice = %q, want %q", got, captured)
+			}
+			facade.discovery.SetSubscribed([]Node{n})
+			c := f.candidate(t)
+			if c.url.Host != captured {
+				t.Fatalf("captured URL address = %q, want %q", c.url.Host, captured)
+			}
+			promote := func() {
+				lanReady.Store(true)
+				releaseVerifier()
+				facade.targets.Prefer(n.ID, addresses)
+				waitForTarget(t, f.p, n, lan)
+			}
+			req := proxyReverseRequest(t, http.MethodGet, c.url.String(), nil)
+			if duringSetup {
+				lanReady.Store(true)
+				req = req.WithContext(clustertrust.WithPeerSlotAcquired(req.Context(), func(*http.Request, time.Duration) error {
+					promote()
+					return nil
+				}))
+			} else {
+				promote()
+			}
+			transport := f.p.candidateTransport(c)
+			resp, err := transport.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("pinned request could not use its still-published address after promotion: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent || f.directCalls.Load() != 1 || f.reverseCalls.Load() != 0 {
+				t.Fatalf("status/direct/reverse = %d/%d/%d, want 204/1/0", resp.StatusCode, f.directCalls.Load(), f.reverseCalls.Load())
+			}
+			n.Addresses = n.Addresses[:1]
+			facade.discovery.SetSubscribed([]Node{n})
+			if resp, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, c.url.String(), nil)); err == nil {
+				resp.Body.Close()
+				t.Fatal("pinned request used an unpublished address")
+			}
+			if f.directCalls.Load() != 1 || f.reverseCalls.Load() != 0 {
+				t.Fatal("unpublished address was dialed")
+			}
+		})
 	}
 }
 

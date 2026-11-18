@@ -147,9 +147,9 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
 	// Streams have no total timeout and no connection reuse; consumeStream
 	// bounds the connect and ReadSnapshotStream the idle time.
 	m.performance.streams = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
-		BaseConfigDir: peerConfigBase(clusterDir),
-		ResolveRoute:  m.broadcaster.resolveRoute,
-		Changed:       m.broadcaster.peerChanges,
+		BaseConfigDir:          peerConfigBase(clusterDir),
+		ResolveRouteForAddress: m.broadcaster.resolveRoute,
+		Changed:                m.broadcaster.peerChanges,
 	})
 	m.server.performance = m.performance
 	return m

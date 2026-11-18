@@ -869,7 +869,7 @@ func TestPeerServiceClientSlotAcquiredRefusal(t *testing.T) {
 		t.Error("refused request reached the destination")
 	}))
 	key := peerServiceKey{"peer", noderec.ServiceCluster}
-	identity, _, err := f.adapter.authority(key)
+	identity, _, err := f.adapter.authority(key, "")
 	if err != nil {
 		t.Fatal(err)
 	}

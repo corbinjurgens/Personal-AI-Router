@@ -60,7 +60,7 @@ func performanceStreamServe(t *testing.T, f *performanceFixture, handler http.Ha
 		_ = server.Serve(tls.NewListener(listener, peerMesh.ServerTLSConfig()))
 	}()
 	f.manager.performance.streams = clustertrust.NewPeerServiceClient(f.manager.mesh, clustertrust.PeerServiceClientOptions{
-		ResolveRoute: f.manager.broadcaster.resolveRoute,
+		ResolveRouteForAddress: f.manager.broadcaster.resolveRoute,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			client, peer := net.Pipe()
 			select {
@@ -611,7 +611,7 @@ func (s *Server) pinnedDispatch(t *testing.T, f *performanceFixture, method stri
 func TestPerformanceSubscriptionsFollowAdmittedTargets(t *testing.T) {
 	f := newPerformanceFixture(t)
 	f.manager.performance.streams = clustertrust.NewPeerServiceClient(f.manager.mesh, clustertrust.PeerServiceClientOptions{
-		ResolveRoute: f.manager.broadcaster.resolveRoute,
+		ResolveRouteForAddress: f.manager.broadcaster.resolveRoute,
 		DialContext: func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("test dial disabled")
 		},

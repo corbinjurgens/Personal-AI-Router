@@ -119,7 +119,6 @@ type facade struct {
 type proxyPeerEndpoint struct {
 	nodeID     string
 	addresses  []string
-	selected   string
 	generation uint64
 }
 
@@ -129,6 +128,9 @@ func (f *facade) refreshPeerEndpoints() {
 	f.peerMu.Lock()
 	defer f.peerMu.Unlock()
 	f.refreshPeerEndpointsLocked()
+	for _, endpoint := range f.peerEndpoints {
+		f.targets.PreferCached(endpoint.nodeID, endpoint.addresses)
+	}
 }
 
 func (f *facade) refreshPeerEndpointsLocked() {
@@ -146,11 +148,10 @@ func (f *facade) refreshPeerEndpointsLocked() {
 		if len(addresses) == 0 {
 			continue
 		}
-		endpoint := proxyPeerEndpoint{nodeID: n.ID, addresses: addresses,
-			selected: f.targets.PreferCached(n.ID, addresses)}
+		endpoint := proxyPeerEndpoint{nodeID: n.ID, addresses: addresses}
 		previous, exists := f.peerEndpoints[n.ClusterUUID]
 		if exists && previous.nodeID == endpoint.nodeID &&
-			slices.Equal(previous.addresses, addresses) && previous.selected == endpoint.selected {
+			slices.Equal(previous.addresses, addresses) {
 			endpoint.generation = previous.generation
 		} else {
 			f.peerGeneration++

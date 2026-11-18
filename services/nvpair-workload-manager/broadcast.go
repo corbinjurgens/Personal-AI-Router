@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -73,10 +74,10 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 		return b.mesh.VerifyPeerAddress(ctx, peer.uuid, address)
 	}))
 	b.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
-		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
-		BaseConfigDir:     peerConfigBase(clusterDir),
-		ResolveRoute:      b.resolveRoute,
-		Changed:           b.peerChanges,
+		PeerClientOptions:      clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
+		BaseConfigDir:          peerConfigBase(clusterDir),
+		ResolveRouteForAddress: b.resolveRoute,
+		Changed:                b.peerChanges,
 		// Only post uses this client: nonempty, known-length event/cancel
 		// POSTs whose receiver owns deduplication. The adapter never replays.
 		ReuseConnections: true,
@@ -111,7 +112,7 @@ func peerConfigBase(clusterDir string) string {
 
 // resolveRoute combines shared admission authority with the current discovery
 // endpoint at every adapter authorization boundary, including after TLS setup.
-func (b *Broadcaster) resolveRoute(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+func (b *Broadcaster) resolveRoute(uuid string, service noderec.ServiceKey, address string) (clustertrust.PeerServiceRoute, bool) {
 	fail := func() (clustertrust.PeerServiceRoute, bool) { return clustertrust.PeerServiceRoute{}, false }
 	b.mesh.Refresh()
 	if service != noderec.ServiceWorkload {
@@ -122,12 +123,12 @@ func (b *Broadcaster) resolveRoute(uuid string, service noderec.ServiceKey) (clu
 		return fail()
 	}
 	t, generation, ok := b.peers.targetUUID(uuid)
-	if !ok {
+	if !ok || !slices.Contains(t.candidates, address) {
 		return fail()
 	}
 	return clustertrust.PeerServiceRoute{
 		Incarnation: incarnation,
-		Address:     b.addrs.Prefer(t.id, t.candidates),
+		Address:     address,
 		Protocol:    clustertrust.ReverseTLS,
 		Generation:  generation,
 	}, true
