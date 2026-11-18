@@ -5,13 +5,16 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { EngineModels, ModelIdentity } from '@/shared/types/engines'
+import type { EngineModels, EngineProgress, ModelIdentity } from '@/shared/types/engines'
+import type { ModelDownloadEntry } from '@/shared/types/model-download'
 import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
 import type { ModelCopyResponse } from '@/shared/types/model-copy'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi } from '@/ui/api/pair-api'
 import type { IEngineApi } from '@/ui/api/engine-api'
+import { engineProgressKey } from '@/shared/utils/engine-progress'
+import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import { ModelsView } from '@/ui/components/Models/ModelsView'
 import { ModelManager } from '@/ui/components/ModelManager/ModelManager'
 import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
@@ -303,11 +306,12 @@ describe('Models tab', () => {
         await act(async () => root.render(<ModelsView />))
         const group = container.querySelector('section[aria-label="owner/Tiel"]')
         expect(group?.textContent).toContain('Tiel')
-        expect(group?.textContent).toContain('On 2 nodes')
-        expect(group?.textContent).toContain('MSI')
-        expect(group?.textContent).toContain('· tiel-msi')
-        expect(group?.textContent).toContain('Joes')
-        expect(group?.textContent).toContain('· tiel-joes')
+        const rows = Array.from(group?.querySelectorAll('li') ?? []).map(row => row.textContent)
+        expect(rows).toHaveLength(2)
+        expect(rows[0]).toContain('MSI')
+        expect(rows[0]).toContain('tiel-msi')
+        expect(rows[1]).toContain('Joes')
+        expect(rows[1]).toContain('tiel-joes')
         expect(group?.textContent).toContain('Same file not verified')
     })
 
@@ -401,6 +405,115 @@ describe('Models tab', () => {
         await act(async () => button('Delete on node').click())
         await act(async () => button('Cancel').click())
         expect(deleteModel).not.toHaveBeenCalled()
+    })
+
+    it('lists a running download once although every engine list carries the node snapshot', async () => {
+        const fork = engineTypeFromManagerName('llamacpp-fork')
+        if (!fork) throw new Error('Missing descriptor engine type')
+        const entry: ModelDownloadEntry = {
+            id: 'download-1',
+            engine: 'llamacpp',
+            model: 'owner/New-GGUF:Q4_K_M',
+            phase: 'in_progress',
+            blocksReadiness: true,
+            percent: 40
+        }
+        const withSnapshot = (list: EngineModels): EngineModels => ({
+            ...list,
+            downloadState: list.downloadState && { ...list.downloadState, entries: [entry] }
+        })
+        const pull = (nodeId: string): EngineProgress => ({
+            nodeId,
+            nodeName: nodeId,
+            engineType: 'llama-cpp',
+            operation: 'pull',
+            model: entry.model,
+            status: entry.phase,
+            percent: entry.percent,
+            downloadState: entry,
+            downloadStateCurrent: true
+        })
+        useEngineModelsStore.setState({
+            models: new Map([
+                ['msi:llama-cpp', withSnapshot(inventory('msi', 'tiel-msi'))],
+                [
+                    `msi:${fork}`,
+                    withSnapshot({ ...inventory('msi', 'fork-model'), engineType: fork })
+                ]
+            ])
+        })
+        useEngineProgressStore.setState({
+            progress: new Map(
+                [pull('msi'), pull('departed')].map(item => [engineProgressKey(item), item])
+            )
+        })
+        await act(async () => root.render(<ModelsView />))
+        const panel = container.querySelector('section[aria-label="Transfers"]')
+        const text = panel?.textContent ?? ''
+        expect(text).toContain('1 running')
+        expect(text.match(/To MSI/g)).toHaveLength(1)
+        expect(text).not.toContain('departed')
+    })
+
+    it('shows a queued download with a moving bar on the Models page', async () => {
+        const entry: ModelDownloadEntry = {
+            id: 'download-2',
+            engine: 'llamacpp',
+            model: 'owner/Queued-GGUF:Q4_K_M',
+            phase: 'queued',
+            blocksReadiness: true
+        }
+        const item: EngineProgress = {
+            nodeId: 'joes',
+            nodeName: 'Joes',
+            engineType: 'llama-cpp',
+            operation: 'pull',
+            model: entry.model,
+            status: entry.phase,
+            downloadState: entry,
+            downloadStateCurrent: true
+        }
+        useEngineProgressStore.setState({ progress: new Map([[engineProgressKey(item), item]]) })
+        await act(async () => root.render(<ModelsView />))
+        const panel = container.querySelector('section[aria-label="Transfers"]')
+        const bar = panel?.querySelector(
+            `[role="progressbar"][aria-label="Download progress for ${entry.model}"]`
+        )
+        expect(bar).not.toBeNull()
+        expect(bar?.getAttribute('aria-valuenow')).toBeNull()
+        expect(panel?.textContent).toContain('Download queued')
+        expect(panel?.textContent).toContain('To Joes')
+    })
+
+    it('dims the chips of an offline holder in the group header and its row', async () => {
+        vi.mocked(useOverviewNodes).mockReturnValue([
+            node('msi', 'MSI'),
+            { ...node('joes', 'Joes'), status: 'offline' }
+        ])
+        await act(async () => root.render(<ModelsView />))
+        const group = container.querySelector('section[aria-label="owner/Tiel"]')
+        const chips = Array.from(group?.querySelectorAll('.pair-node-chip') ?? []).map(chip => [
+            chip.textContent,
+            chip.getAttribute('data-offline')
+        ])
+        expect(chips).toEqual([
+            ['MSI', 'false'],
+            ['Joes', 'true'],
+            [expect.stringContaining('MSI'), 'false'],
+            ['Joes', 'true']
+        ])
+    })
+
+    it('shows a chip for each of two nodes that share a name', async () => {
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+        vi.mocked(useOverviewNodes).mockReturnValue([node('msi', 'PC'), node('joes', 'PC')])
+        await act(async () => root.render(<ModelsView />))
+        const group = container.querySelector('section[aria-label="owner/Tiel"]')
+        expect(group?.querySelectorAll('.pair-node-chip')).toHaveLength(4)
+        const keyWarnings = errors.mock.calls.filter(call =>
+            call.some(arg => String(arg).includes('same key'))
+        )
+        expect(keyWarnings).toEqual([])
     })
 
     it.each(['tiel-msi', 'lfm-64k'])(

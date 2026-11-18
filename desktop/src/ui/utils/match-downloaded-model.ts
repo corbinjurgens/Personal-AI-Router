@@ -15,7 +15,7 @@ import type { ModelEntry } from '@/ui/types/model-hub'
  * - llama.cpp:       router inventory and catalog use the same complete
  *                    `<owner>/<repo>:<quant>` id, so only exact ids match.
  */
-type DownloadedMatcher = (hubEntry: ModelEntry, downloaded: ModelItem) => boolean
+type DownloadedMatcher = (hubEntry: Pick<ModelEntry, 'id'>, downloaded: ModelItem) => boolean
 
 const matchExactName: DownloadedMatcher = (hubEntry, downloaded) => downloaded.name === hubEntry.id
 
@@ -29,7 +29,7 @@ const MATCHERS: Record<BuiltinEngineType, DownloadedMatcher> = {
  */
 export function isHubEntryDownloaded(
     adapterType: BuiltinEngineType | null,
-    hubEntry: ModelEntry,
+    hubEntry: Pick<ModelEntry, 'id'>,
     downloaded: readonly ModelItem[]
 ): boolean {
     if (downloaded.length === 0 || !adapterType) return false

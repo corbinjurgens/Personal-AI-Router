@@ -11,7 +11,10 @@ function model(id: string, updatedAt: string): ModelEntry {
         name: id,
         author: id.slice(0, id.indexOf('/')),
         url: `https://huggingface.co/${id.slice(0, id.lastIndexOf(':'))}`,
-        updatedAt: new Date(updatedAt)
+        updatedAt: new Date(updatedAt),
+        downloads: 0,
+        likes: 0,
+        tags: []
     }
 }
 

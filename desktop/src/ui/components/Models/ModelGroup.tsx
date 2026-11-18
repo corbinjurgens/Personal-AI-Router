@@ -7,7 +7,9 @@ import {
     type ClusterModelGroup,
     type ClusterModelLocation
 } from '@/ui/utils/group-cluster-models'
-import { LocalBadge } from '@/ui/components/LocalBadge'
+import type { NodeItem } from '@/shared/types/nodes'
+import { Monogram, NodeChip } from '@/ui/components/Page/PagePrimitives'
+import { Layers } from '@/ui/components/icons'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useEngineDescriptor } from '@/ui/stores/engine-status.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
@@ -17,15 +19,16 @@ import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import { engineLabel, engineManagerName } from '@/shared/utils/engines'
 import { isEnginePullInProgress } from '@/shared/utils/engine-progress'
 import { formatBytes } from '@/ui/utils/formatters'
+import { hubModelFacts } from '@/ui/utils/hub-model-facts'
 
 function ModelLocation({
     location,
-    nodeName,
+    node,
     onCopy,
     onDelete
 }: {
     location: ClusterModelLocation
-    nodeName: string
+    node: NodeItem
     onCopy: (location: ClusterModelLocation) => void
     onDelete: (location: ClusterModelLocation) => void
 }) {
@@ -70,29 +73,21 @@ function ModelLocation({
     }
     void inventory
     return (
-        <Flex
-            gap="3"
-            align="center"
-            justify="between"
-            className="py-2 border-t border-[#ffffff0f] first:border-t-0"
-        >
-            <Flex gap="2" align="center" className="min-w-0">
-                <Text kind="body/semibold/sm" className="shrink-0">
-                    {nodeName}
-                </Text>
-                {local && <LocalBadge />}
+        <li className="flex items-center gap-3 py-2 pair-divider-top first:border-t-0">
+            <Flex gap="2" align="center" className="min-w-0 grow">
+                <NodeChip node={node} local={local} title={`Served as ${model.name}`} />
                 <Text
-                    kind="body/regular/sm"
-                    className="text-subtle-color truncate"
+                    kind="mono/sm"
+                    className="text-subtle-color truncate min-w-0"
                     title={model.name}
                 >
-                    · {model.name}
+                    {model.name}
                 </Text>
-                <Text kind="body/regular/xs" className="text-subtle2 shrink-0">
+                <Text kind="body/regular/xs" className="text-subtle2 shrink-0 hidden md:inline">
                     {engineLabel(engineType, descriptor)}
                 </Text>
             </Flex>
-            <Flex gap="2" className="shrink-0">
+            <Flex gap="1" className="shrink-0">
                 <Button
                     size="small"
                     kind="secondary"
@@ -101,6 +96,7 @@ function ModelLocation({
                         if (allowed(true)) onCopy(location)
                     }}
                 >
+                    <Layers />
                     Copy to node
                 </Button>
                 <Button
@@ -114,63 +110,70 @@ function ModelLocation({
                     Delete on node
                 </Button>
             </Flex>
-        </Flex>
+        </li>
     )
 }
 
-/** Splits `owner/name` so the model name leads and the publisher sits beneath it. */
+/** The model name leads and the publisher sits beneath it. */
 function splitRepository(name: string): { title: string; owner?: string } {
     const slash = name.indexOf('/')
-    return slash > 0 && slash < name.length - 1
-        ? { title: name.slice(slash + 1), owner: name.slice(0, slash) }
-        : { title: name }
+    return {
+        title: hubModelFacts(name).title,
+        owner: slash > 0 && slash < name.length - 1 ? name.slice(0, slash) : undefined
+    }
 }
 
 export function ModelGroup({
     group,
-    nodeNames,
+    nodesById,
     onCopy,
     onDelete
 }: {
     group: ClusterModelGroup
-    nodeNames: ReadonlyMap<string, string>
+    nodesById: ReadonlyMap<string, NodeItem>
     onCopy: (location: ClusterModelLocation) => void
     onDelete: (location: ClusterModelLocation) => void
 }) {
     const { title, owner } = splitRepository(group.name)
-    const holders = new Set(
-        group.variants.flatMap(variant => variant.locations.map(location => location.nodeId))
-    ).size
+    const holders = [
+        ...new Set(
+            group.variants.flatMap(variant => variant.locations.map(location => location.nodeId))
+        )
+    ].flatMap(id => nodesById.get(id) ?? [])
     return (
         <section className="pair-paper p-4" aria-label={group.name}>
-            <Flex align="start" justify="between" gap="3">
-                <Stack gap="1" className="min-w-0">
-                    <Text kind="body/semibold/lg" className="break-words" title={group.name}>
+            <Flex align="center" gap="3">
+                <Monogram name={title} size={40} />
+                <Stack gap="0" className="min-w-0 grow">
+                    <Text kind="body/semibold/lg" className="truncate" title={group.name}>
                         {title}
                     </Text>
-                    {owner && (
-                        <Text kind="body/regular/sm" className="text-subtle-color">
-                            {owner}
-                        </Text>
-                    )}
+                    <Text kind="body/regular/sm" className="text-subtle-color truncate">
+                        {[
+                            owner,
+                            `${group.variants.length} ${group.variants.length === 1 ? 'quantization' : 'quantizations'}`
+                        ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                    </Text>
                 </Stack>
-                <Text kind="body/regular/sm" className="text-subtle-color shrink-0">
-                    On {holders} {holders === 1 ? 'node' : 'nodes'}
-                </Text>
+                <Flex gap="1" wrap="wrap" justify="end" className="shrink-0 max-w-[45%]">
+                    {holders.map(node => (
+                        <NodeChip key={node.id} node={node} />
+                    ))}
+                </Flex>
             </Flex>
-            <Stack gap="2" className="mt-3">
+            <Stack gap="2" className="mt-4">
                 {group.variants.map(variant => {
                     const size = clusterVariantSize(variant)
                     return (
-                        <div key={variant.key} className="rounded-md bg-[#ffffff08] px-3 py-2">
-                            <Flex align="center" gap="2" wrap="wrap" className="pb-1">
+                        <div key={variant.key} className="pair-tile px-3 pt-2.5 pb-1">
+                            <Flex align="center" gap="2" wrap="wrap" className="pb-1.5">
                                 <Tag color="green" density="compact" readOnly>
                                     {variant.quantization}
                                 </Tag>
                                 {size !== undefined && (
-                                    <Text kind="body/regular/sm" className="text-subtle-color">
-                                        {formatBytes(size, 1)}
-                                    </Text>
+                                    <Text kind="body/semibold/sm">{formatBytes(size, 1)}</Text>
                                 )}
                                 {variant.unverified && (
                                     <Badge
@@ -181,15 +184,22 @@ export function ModelGroup({
                                     </Badge>
                                 )}
                             </Flex>
-                            {variant.locations.map(location => (
-                                <ModelLocation
-                                    key={`${location.nodeId}:${location.engineType}:${location.model.name}`}
-                                    location={location}
-                                    nodeName={nodeNames.get(location.nodeId) ?? location.nodeId}
-                                    onCopy={onCopy}
-                                    onDelete={onDelete}
-                                />
-                            ))}
+                            <ul className="m-0 p-0 list-none">
+                                {variant.locations.flatMap(location => {
+                                    const node = nodesById.get(location.nodeId)
+                                    return node ? (
+                                        <ModelLocation
+                                            key={`${location.nodeId}:${location.engineType}:${location.model.name}`}
+                                            location={location}
+                                            node={node}
+                                            onCopy={onCopy}
+                                            onDelete={onDelete}
+                                        />
+                                    ) : (
+                                        []
+                                    )
+                                })}
+                            </ul>
                         </div>
                     )
                 })}

@@ -52,7 +52,7 @@ describe('profile card summary', () => {
                 strength: 'declared',
                 configuredContextTokens: 8192
             }).context
-        ).toBe('8192')
+        ).toBe('8K')
     })
 
     it('shows Unknown for summary fields absent from policy and inspection', () => {
@@ -75,6 +75,11 @@ describe('profile card summary', () => {
                     extraOptions: { first: 'one', second: 'two' }
                 }
             })
-        ).toMatchObject({ context: '8192', gpu: '20 GPU layers', extraOptions: '2' })
+        ).toMatchObject({
+            context: '8K',
+            contextTokens: 8192,
+            gpu: '20 layers',
+            extraOptions: '2'
+        })
     })
 })

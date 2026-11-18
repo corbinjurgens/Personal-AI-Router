@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import getErrorString from '@/shared/utils/get-error-string'
-import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
+import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { LocalBadge } from '@/ui/components/LocalBadge'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -16,17 +16,23 @@ import {
     watchNodeManagement
 } from '@/ui/stores/node-configuration.store'
 import { useEngineSettingsStore, watchEngineSettings } from '@/ui/stores/engine-settings.store'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
+import { PageHeading } from '@/ui/components/Page/PagePrimitives'
+import { SettingsOutlined } from '@/ui/components/icons'
+import { readableServiceError } from '@/ui/utils/readable-service-error'
 import { ProfileCard } from './ProfileCard'
 
 function NodeProfiles({
     nodeId,
     nodeName,
     local,
+    offline,
     advertisementsLoading
 }: {
     nodeId: string
     nodeName: string
     local: boolean
+    offline: boolean
     advertisementsLoading: boolean
 }) {
     const connected = useConnectionStore(state => state.connected)
@@ -96,31 +102,53 @@ function NodeProfiles({
             !policy ||
             entry?.phase === 'reading' ||
             entry?.phase === 'sending')
+    const focus = useOverviewUiStore(state => state.focusNodeSettings)
     return (
-        <Stack gap="3">
-            <Flex align="center" gap="2">
-                <Text kind="body/semibold/lg">{nodeName}</Text>
-                {local && <LocalBadge />}
-                {!unavailable && !loading && profiles.length > 0 && (
-                    <Text kind="body/regular/sm" className="text-subtle-color">
-                        {profiles.length} {profiles.length === 1 ? 'profile' : 'profiles'}
+        <section className="flex flex-col gap-3" aria-label={`${nodeName} profiles`}>
+            <Flex align="center" justify="between" gap="2">
+                <Flex align="center" gap="2" className="min-w-0">
+                    <Text kind="title/sm" role="heading" aria-level={2} className="truncate">
+                        {nodeName}
                     </Text>
+                    {local && <LocalBadge />}
+                    {!unavailable && !loading && profiles.length > 0 && (
+                        <Text kind="body/regular/sm" className="text-subtle-color shrink-0">
+                            {profiles.length} {profiles.length === 1 ? 'profile' : 'profiles'}
+                        </Text>
+                    )}
+                </Flex>
+                {!unavailable && (
+                    <Button kind="tertiary" size="small" onClick={() => focus(nodeId)}>
+                        <SettingsOutlined />
+                        Node settings
+                    </Button>
                 )}
             </Flex>
             {unavailable ? (
-                <Text kind="body/regular/sm" className="text-subtle-color">
-                    Profiles unavailable: {unavailable}
-                </Text>
+                <div className="pair-tile px-4 py-3">
+                    <Text kind="body/regular/sm" className="text-subtle-color" title={unavailable}>
+                        {offline
+                            ? `${nodeName} is offline, so its profiles can't be read.`
+                            : `Profiles unavailable: ${readableServiceError(unavailable)}`}
+                    </Text>
+                </div>
             ) : loading ? (
-                <Text kind="body/regular/sm" className="text-subtle-color" role="status">
-                    Loading profiles for {nodeName}…
-                </Text>
+                <div className="pair-tile px-4 py-3">
+                    <Flex align="center" gap="2">
+                        <span className="spinner-element-small" aria-hidden="true" />
+                        <Text kind="body/regular/sm" className="text-subtle-color" role="status">
+                            Loading profiles for {nodeName}…
+                        </Text>
+                    </Flex>
+                </div>
             ) : profiles.length === 0 ? (
-                <Text kind="body/regular/sm" className="text-subtle-color">
-                    No profiles configured.
-                </Text>
+                <div className="pair-tile px-4 py-3">
+                    <Text kind="body/regular/sm" className="text-subtle-color">
+                        No profiles configured.
+                    </Text>
+                </div>
             ) : (
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(340px,1fr))]">
                     {profiles.map(profile => (
                         <ProfileCard
                             key={profile.key}
@@ -133,7 +161,7 @@ function NodeProfiles({
                     ))}
                 </div>
             )}
-        </Stack>
+        </section>
     )
 }
 
@@ -156,21 +184,24 @@ export default function ProfilesView() {
             active = false
         }
     }, [connected])
-    const targets = nodes.map(node => ({ id: node.id, name: node.name }))
+    const targets = nodes.map(node => ({
+        id: node.id,
+        name: node.name,
+        offline: node.status === 'offline'
+    }))
     return (
         <Stack gap="6" className="px-6 py-5 w-full max-w-300">
-            <Stack gap="1">
-                <Text kind="title/sm">Profiles</Text>
-                <Text kind="body/regular/sm" className="text-subtle-color">
-                    Saved model configurations on each node, and the roles that use them
-                </Text>
-            </Stack>
+            <PageHeading
+                title="Profiles"
+                description="Saved model configurations on each node, and the roles that use them."
+            />
             {targets.map(node => (
                 <NodeProfiles
                     key={node.id}
                     nodeId={node.id}
                     nodeName={node.name}
                     local={node.id === selfId}
+                    offline={node.offline}
                     advertisementsLoading={advertisementsLoading}
                 />
             ))}

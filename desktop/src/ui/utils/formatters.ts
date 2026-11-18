@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ModelDownloadEntry } from '@/shared/types/model-download'
+
 /**
  * Utility functions for formatting data
  */
@@ -76,6 +78,13 @@ export function formatBytes(bytes: number, decimals: number = 2): string {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i]
 }
 
+/** Short count for statistics such as downloads: 1234 -> "1.2K", 3400000 -> "3.4M". */
+export function formatCompactCount(count: number): string {
+    return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(
+        Math.max(0, count)
+    )
+}
+
 type PullProgressFields = {
     status?: string
     percent?: number
@@ -137,6 +146,37 @@ export function formatDownloadStatus(status: string, current: boolean | undefine
         default:
             return 'Download status unknown'
     }
+}
+
+/** Why a download failed, in plain words, from its download-state reason code. */
+export function formatDownloadFailure(reason: ModelDownloadEntry['reason']): string {
+    switch (reason) {
+        case 'busy':
+            return 'the engine was busy with another download'
+        case 'capacity':
+            return 'too many downloads were already running'
+        case 'download_failed':
+            return 'the files could not be downloaded'
+        case 'interrupted':
+            return 'it was interrupted before it finished'
+        case 'progress_timeout':
+            return 'it stopped making progress'
+        case 'acceptance_unknown':
+            return 'the engine did not confirm it started'
+        case 'cleanup_unknown':
+            return 'partial files may not have been cleaned up'
+        case 'persistence_error':
+            return 'its state could not be saved'
+        case 'unsupported':
+            return 'this engine cannot download that model'
+        default:
+            return 'no reason was reported'
+    }
+}
+
+/** A context size as people say it: 65536 -> "64K"; other sizes in full. */
+export function formatContextTokens(tokens: number): string {
+    return tokens >= 1024 && tokens % 1024 === 0 ? `${tokens / 1024}K` : tokens.toLocaleString('en')
 }
 
 /**

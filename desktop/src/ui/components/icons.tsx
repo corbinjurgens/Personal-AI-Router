@@ -19,6 +19,8 @@ import {
     ExternalLink,
     Filter,
     FileText,
+    Heart,
+    Layers as LucideLayers,
     Globe,
     Image as LucideImage,
     MessageSquare,
@@ -58,6 +60,8 @@ export const Close = appIcon(X)
 export const ContentCopy = appIcon(Copy)
 export const Square = appIcon(LucideSquare)
 export const Download = appIcon(LucideDownload)
+export const Favorite = appIcon(Heart)
+export const Layers = appIcon(LucideLayers)
 export const GenericEngine = appIcon(Cpu)
 export const ExpandMore = appIcon(ChevronDown)
 export const FilterList = appIcon(Filter)

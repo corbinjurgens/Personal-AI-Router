@@ -2,18 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Flex, ProgressBar, Stack, Text, TextInput } from '@nvidia/foundations-react-core'
+import { Button, Flex, Stack, Text, TextInput } from '@nvidia/foundations-react-core'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
-import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
 import { useModelDelete } from '@/ui/hooks/useModelDelete'
-import { groupClusterModels, type ClusterModelLocation } from '@/ui/utils/group-cluster-models'
-import { formatCopyProgressLabel } from '@/ui/utils/formatters'
+import {
+    clusterVariantSize,
+    groupClusterModels,
+    type ClusterModelLocation
+} from '@/ui/utils/group-cluster-models'
+import { formatBytes } from '@/ui/utils/formatters'
 import { ModelCopyModal } from '@/ui/components/ModelManager/ModelCopyModal'
-import { Search } from '@/ui/components/icons'
+import { Download, Search } from '@/ui/components/icons'
+import { PageHeading, StatTile } from '@/ui/components/Page/PagePrimitives'
+import { TransfersPanel } from './TransfersPanel'
 import { ModelGroup } from './ModelGroup'
 import { ModelDeleteConfirmation } from './ModelDeleteConfirmation'
-import { ModelDownloadDialog } from './ModelDownloadDialog'
 import { SourceModelsSection } from './SourceModelsSection'
 import { AddModelFileDialog } from './AddModelFileDialog'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
@@ -22,21 +27,16 @@ import { SOURCE_MODELS_ENGINE_TYPE, useSourceModelsStore } from '@/ui/stores/sou
 import { engineManagerName } from '@/shared/utils/engines'
 import type { EngineType } from '@/shared/types/engines'
 
-function plural(count: number, one: string, many = `${one}s`): string {
-    return `${count} ${count === 1 ? one : many}`
-}
-
 export function ModelsView() {
     const inventory = useEngineModelsStore(state => state.models)
-    const progress = useEngineProgressStore(state => state.progress)
     const nodes = useOverviewNodes()
-    const nodeNames = useMemo(() => new Map(nodes.map(node => [node.id, node.name])), [nodes])
+    const nodesById = useMemo(() => new Map(nodes.map(node => [node.id, node])), [nodes])
     const groups = useMemo(
         () =>
             groupClusterModels(
-                Array.from(inventory.values()).filter(list => nodeNames.has(list.nodeId))
+                Array.from(inventory.values()).filter(list => nodesById.has(list.nodeId))
             ),
-        [inventory, nodeNames]
+        [inventory, nodesById]
     )
     const [query, setQuery] = useState('')
     const refreshSources = useSourceModelsStore(state => state.refreshAll)
@@ -54,7 +54,7 @@ export function ModelsView() {
                       variant.quantization,
                       ...variant.locations.flatMap(location => [
                           location.model.name,
-                          nodeNames.get(location.nodeId) ?? location.nodeId
+                          nodesById.get(location.nodeId)?.name ?? location.nodeId
                       ])
                   ])
               ].some(text => text.toLowerCase().includes(needle))
@@ -70,7 +70,6 @@ export function ModelsView() {
             group.variants.flatMap(variant => variant.locations.map(location => location.nodeId))
         )
     ).size
-    const transfers = Array.from(progress.values()).filter(item => item.operation === 'copy')
     const deletion = useModelDelete()
     const [copy, setCopy] = useState<{
         engineType: EngineType
@@ -79,7 +78,7 @@ export function ModelsView() {
         opId?: string
         destination?: string
     } | null>(null)
-    const [downloading, setDownloading] = useState(false)
+    const setActiveTab = useOverviewUiStore(state => state.setActiveTab)
     const [addingFile, setAddingFile] = useState(false)
     const [profileFor, setProfileFor] = useState<string | null>(null)
     const selfId = useConnectionStore(state => state.selfId)
@@ -90,84 +89,93 @@ export function ModelsView() {
             model: location.model.name
         })
 
+    const totalBytes = groups.reduce(
+        (sum, group) =>
+            sum +
+            group.variants.reduce(
+                (bytes, variant) =>
+                    bytes + (clusterVariantSize(variant) ?? 0) * variant.locations.length,
+                0
+            ),
+        0
+    )
+
     return (
         <Stack gap="5" className="px-6 py-5 w-full max-w-300">
-            <Flex align="end" justify="between" gap="4" wrap="wrap">
-                <Stack gap="1">
-                    <Text kind="title/sm">Models</Text>
-                    <Text kind="body/regular/sm" className="text-subtle-color">
-                        {groups.length === 0
-                            ? 'Downloaded models on every node in the cluster'
-                            : `${plural(groups.length, 'model')} · ${plural(copies, 'copy', 'copies')} on ${plural(holders, 'node')}`}
-                    </Text>
-                </Stack>
-                <Flex align="center" gap="3" wrap="wrap" className="max-w-full">
-                    {groups.length > 0 && (
-                        <Flex align="center" gap="2" className="w-72 max-w-full">
-                            <Search className="shrink-0 text-subtle-color" />
-                            <TextInput
-                                placeholder="Filter by model, quantization or node"
-                                aria-label="Filter models"
-                                value={query}
-                                onValueChange={setQuery}
-                                className="flex-1 min-w-0"
-                            />
-                        </Flex>
-                    )}
-                    <Button kind="secondary" onClick={() => setAddingFile(true)}>
-                        Add from file
-                    </Button>
-                    <Button kind="primary" color="brand" onClick={() => setDownloading(true)}>
-                        Download model
-                    </Button>
-                </Flex>
-            </Flex>
+            <PageHeading
+                title="Models"
+                description="Every model downloaded in your cluster, grouped by model and quantization."
+                actions={
+                    <>
+                        <Button kind="secondary" onClick={() => setAddingFile(true)}>
+                            Add from file
+                        </Button>
+                        <Button
+                            kind="primary"
+                            color="brand"
+                            onClick={() => setActiveTab('discover')}
+                        >
+                            <Download />
+                            Download model
+                        </Button>
+                    </>
+                }
+            />
 
-            {transfers.length > 0 && (
-                <div className="pair-paper p-4">
-                    <Stack gap="3">
-                        <Text kind="body/semibold/md">Copies in progress</Text>
-                        {transfers.map(item => (
-                            <Flex key={item.opId} align="center" gap="3" justify="between">
-                                <Stack gap="1" className="min-w-0 grow">
-                                    <Text kind="body/regular/sm" className="truncate">
-                                        {item.model} · {formatCopyProgressLabel(item)}
-                                    </Text>
-                                    {item.percent !== undefined && (
-                                        <ProgressBar
-                                            size="small"
-                                            value={Math.min(100, Math.max(0, item.percent))}
-                                            aria-label={`Copy progress for ${item.model ?? ''}`}
-                                        />
-                                    )}
-                                </Stack>
-                                <Button
-                                    size="small"
-                                    kind="tertiary"
-                                    onClick={() =>
-                                        setCopy({
-                                            engineType: item.engineType,
-                                            source: item.sourceNodeId ?? '',
-                                            model: item.model ?? '',
-                                            opId: item.opId
-                                        })
-                                    }
-                                >
-                                    View copy
-                                </Button>
-                            </Flex>
-                        ))}
-                    </Stack>
+            {groups.length > 0 && (
+                <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                    <StatTile label="Models" value={groups.length} />
+                    <StatTile label="Copies" value={copies} />
+                    <StatTile label="Nodes with models" value={holders} />
+                    <StatTile
+                        label="Disk used"
+                        value={totalBytes > 0 ? formatBytes(totalBytes, 1) : 'Not reported'}
+                    />
                 </div>
             )}
 
+            <TransfersPanel
+                nodesById={nodesById}
+                onViewCopy={item =>
+                    setCopy({
+                        engineType: item.engineType,
+                        source: item.sourceNodeId ?? '',
+                        model: item.model ?? '',
+                        opId: item.opId
+                    })
+                }
+            />
+
+            {groups.length > 0 && (
+                <TextInput
+                    placeholder="Filter by model, quantization or node"
+                    aria-label="Filter models"
+                    value={query}
+                    onValueChange={setQuery}
+                    slotStart={<Search className="text-subtle-color" />}
+                />
+            )}
+
             {groups.length === 0 ? (
-                <div className="pair-paper p-6">
-                    <Stack gap="1">
-                        <Text kind="body/semibold/md">No model inventory available</Text>
-                        <Text kind="body/regular/sm" className="text-subtle-color">
-                            Models appear here once a node reports its downloaded models.
+                <div className="pair-paper px-6 py-10">
+                    <Stack gap="3" align="center" className="text-center">
+                        <Text kind="title/sm">No models yet</Text>
+                        <Text kind="body/regular/sm" className="text-subtle-color max-w-120">
+                            Models appear here once a node reports its downloaded models. Find one
+                            to download, or add a GGUF file you already have.
                         </Text>
+                        <Flex gap="2">
+                            <Button kind="secondary" onClick={() => setAddingFile(true)}>
+                                Add from file
+                            </Button>
+                            <Button
+                                kind="primary"
+                                color="brand"
+                                onClick={() => setActiveTab('discover')}
+                            >
+                                Discover models
+                            </Button>
+                        </Flex>
                     </Stack>
                 </div>
             ) : visible.length === 0 ? (
@@ -175,21 +183,23 @@ export function ModelsView() {
                     No models match “{query.trim()}”.
                 </Text>
             ) : (
-                visible.map(group => (
-                    <ModelGroup
-                        key={group.key}
-                        group={group}
-                        nodeNames={nodeNames}
-                        onCopy={openCopy}
-                        onDelete={location => {
-                            void deletion.request(
-                                location.engineType,
-                                location.nodeId,
-                                location.model.name
-                            )
-                        }}
-                    />
-                ))
+                <Stack gap="3">
+                    {visible.map(group => (
+                        <ModelGroup
+                            key={group.key}
+                            group={group}
+                            nodesById={nodesById}
+                            onCopy={openCopy}
+                            onDelete={location => {
+                                void deletion.request(
+                                    location.engineType,
+                                    location.nodeId,
+                                    location.model.name
+                                )
+                            }}
+                        />
+                    ))}
+                </Stack>
             )}
             <SourceModelsSection nodes={nodes} needle={needle} />
             {copy && (
@@ -206,22 +216,6 @@ export function ModelsView() {
                     fixedDestination={copy.destination}
                 />
             )}
-            {downloading && (
-                <ModelDownloadDialog
-                    open
-                    onOpenChange={setDownloading}
-                    nodes={nodes}
-                    onCopy={(source, destination) => {
-                        setDownloading(false)
-                        setCopy({
-                            engineType: source.engineType,
-                            source: source.nodeId,
-                            model: source.model.name,
-                            destination
-                        })
-                    }}
-                />
-            )}
             {addingFile && (
                 <AddModelFileDialog onOpenChange={setAddingFile} onCreateProfile={setProfileFor} />
             )}
@@ -229,7 +223,7 @@ export function ModelsView() {
                 <ModelSettingsPanel
                     key={profileFor}
                     targetId={selfId}
-                    nodeName={nodeNames.get(selfId) ?? 'This PC'}
+                    nodeName={nodesById.get(selfId)?.name ?? 'This PC'}
                     identity={{
                         engine: engineManagerName(SOURCE_MODELS_ENGINE_TYPE),
                         model: profileFor

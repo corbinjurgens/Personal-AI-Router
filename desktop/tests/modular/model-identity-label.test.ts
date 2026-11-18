@@ -58,17 +58,20 @@ describe('identity metadata tags', () => {
             {
                 kind: 'repository',
                 label: 'unsloth/LFM2.5-24B-A2B-GGUF',
-                title: 'Repository from the Hugging Face cache'
+                title: 'Repository from the Hugging Face cache',
+                known: true
             },
             {
                 kind: 'quantization',
                 label: 'UD-Q4_K_XL',
-                title: 'Quantization source: hf-tag'
+                title: 'Quantization source: hf-tag',
+                known: true
             },
             {
                 kind: 'context',
                 label: 'Context 131072',
-                title: "Configured context from PAIR's reading of the configuration"
+                title: "Configured context from PAIR's reading of the configuration",
+                known: true
             }
         ])
     })
@@ -88,12 +91,14 @@ describe('identity metadata tags', () => {
             {
                 kind: 'repository',
                 label: 'Unknown',
-                title: 'Repository unknown: no source establishes it'
+                title: 'Repository unknown: no source establishes it',
+                known: false
             },
             {
                 kind: 'quantization',
                 label: 'Unknown',
-                title: 'Quantization unknown: no source establishes it'
+                title: 'Quantization unknown: no source establishes it',
+                known: false
             }
         ])
     })
@@ -122,18 +127,26 @@ describe('identity metadata tags', () => {
             {
                 kind: 'repository',
                 label: 'Unknown',
-                title: 'Repository unknown: no source establishes it'
+                title: 'Repository unknown: no source establishes it',
+                known: false
             },
             {
                 kind: 'quantization',
                 label: 'Unknown',
-                title: 'Quantization unknown: no source establishes it'
+                title: 'Quantization unknown: no source establishes it',
+                known: false
             },
-            { kind: 'name', label: 'Model general name', title: 'Name from GGUF general.name' },
+            {
+                kind: 'name',
+                label: 'Model general name',
+                title: 'Name from GGUF general.name',
+                known: true
+            },
             {
                 kind: 'context',
                 label: 'Context 8192',
-                title: "Configured context from PAIR's reading of the configuration"
+                title: "Configured context from PAIR's reading of the configuration",
+                known: true
             }
         ])
         expect(
@@ -244,7 +257,9 @@ describe('workload identity lookup', () => {
                     {
                         nodeId: 'origin',
                         engineType: 'llama-cpp',
-                        models: [model(served, { repository: 'wrong/origin', strength: 'declared' })]
+                        models: [
+                            model(served, { repository: 'wrong/origin', strength: 'declared' })
+                        ]
                     }
                 ],
                 [
@@ -252,7 +267,9 @@ describe('workload identity lookup', () => {
                     {
                         nodeId: 'execution',
                         engineType: customEngine,
-                        models: [model(served, { repository: 'wrong/engine', strength: 'declared' })]
+                        models: [
+                            model(served, { repository: 'wrong/engine', strength: 'declared' })
+                        ]
                     }
                 ],
                 [
