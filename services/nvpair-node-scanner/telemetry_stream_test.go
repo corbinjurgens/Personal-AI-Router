@@ -44,6 +44,49 @@ type streamPeerFixture struct {
 
 type eofReader struct{}
 
+type scannerTestChanges struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (s *scannerTestChanges) Changed() <-chan struct{} { s.mu.Lock(); defer s.mu.Unlock(); return s.ch }
+func (s *scannerTestChanges) notify() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	close(s.ch)
+	s.ch = make(chan struct{})
+}
+
+func TestPeerStreamReconnectsAfterChange(t *testing.T) {
+	f := newStreamPeerFixture(t)
+	f.status.Store(http.StatusServiceUnavailable)
+	changes := &scannerTestChanges{ch: make(chan struct{})}
+	f.d.mon = changes
+	previous := newPeerStreamRetry
+	newPeerStreamRetry = func() *clustertrust.PeerRetry {
+		return &clustertrust.PeerRetry{Initial: time.Hour, Cap: time.Hour, StableAfter: time.Second}
+	}
+	defer func() { newPeerStreamRetry = previous }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.d.runNodeInfoStream(ctx, "peer", 1) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-f.ended:
+	case <-time.After(time.Second):
+		t.Fatal("first attempt did not end")
+	}
+	changes.notify()
+	select {
+	case <-f.ended:
+	case <-time.After(time.Second):
+		t.Fatal("change did not reconnect daemon stream")
+	}
+	if f.streams.Load() != 2 {
+		t.Fatalf("streams = %d, want 2", f.streams.Load())
+	}
+}
+
 func testScannerStreamRetry(t *testing.T, d *daemon, run func(context.Context)) {
 	t.Helper()
 	previous := newPeerStreamRetry

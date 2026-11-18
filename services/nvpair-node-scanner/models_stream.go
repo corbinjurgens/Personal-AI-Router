@@ -43,7 +43,7 @@ func (d *daemon) runModelsStream(ctx context.Context, hostUUID string, id uint64
 	var emPort int
 	var generation uint64
 	var guarded bool
-	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPeerStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPeerStreamRetry(), Changed: d.peerChanged()}, func(ctx context.Context) (time.Duration, bool) {
 		generation = d.dir.routeGeneration(hostUUID)
 		node, found := d.dir.get(hostUUID)
 		em, advertised := node.Services[noderec.ServiceEngineManager]
@@ -114,6 +114,7 @@ func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, curr
 	}
 	defer resp.Body.Close()
 	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[modelInventory]{
+		Changed: d.peerChanged(),
 		Idle:    modelsStreamIdle,
 		MaxLine: modelsResponseBytes,
 		Current: func() bool {

@@ -247,7 +247,7 @@ func connectPeerStream(ctx, streamCtx context.Context, cancel context.CancelFunc
 
 // runNodeInfoStream keeps one node-info stream to hostUUID open until ctx ends.
 func (d *daemon) runNodeInfoStream(ctx context.Context, hostUUID string, id uint64) {
-	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPeerStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPeerStreamRetry(), Changed: d.peerChanged()}, func(ctx context.Context) (time.Duration, bool) {
 		up := d.streamPeerOnce(hostUUID, noderec.ServiceNodeInfo, func(client *http.Client, current func() bool, _ noderec.DirectoryNode, host string, port int) (time.Duration, bool) {
 			return d.readNodeInfoStream(ctx, client, current, hostUUID, host, port, id)
 		})
@@ -267,6 +267,7 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 	}
 	defer resp.Body.Close()
 	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[NodeInfoResponse]{
+		Changed: d.peerChanged(),
 		Idle:    nodeInfoStreamIdle,
 		MaxLine: nodeInfoStreamMaxLine,
 		Current: func() bool {

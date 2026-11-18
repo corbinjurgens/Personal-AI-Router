@@ -45,6 +45,7 @@ import (
 // through the broker relay, which the broker builds from this daemon's
 // discovery:node-* stream and fans out to consumers as discovery:nodes snapshots.
 type daemon struct {
+	mon                   interface{ Changed() <-chan struct{} }
 	codec                 *Codec
 	mesh                  *clustertrust.Mesh
 	peerServicesMu        sync.Mutex
@@ -384,15 +385,19 @@ func (d *daemon) announceLocked() {
 // run starts the _nvpair-node responder and browser, folding browse events into
 // the directory and emitting discovery:node-* until ctx is cancelled.
 func (d *daemon) run(ctx context.Context) {
+	mon, err := netmon.Watch(ctx)
+	if err != nil {
+		slog.Warn("network monitor unavailable; advertised ip= is static", "err", err)
+	} else {
+		d.mon = mon
+		if d.mdnsEnabled {
+			go d.watchAddress(mon)
+		}
+	}
 	d.selfMu.Lock()
 	d.runCtx = ctx
 	d.startResponderLocked()
 	d.selfMu.Unlock()
-	if d.mdnsEnabled {
-		// Keep the advertised ip= tracking the host's live network the same way
-		// the responder keeps its A records live (both via netmon).
-		go d.watchAddress(ctx)
-	}
 	// Publish our own directory entry from the local registry BEFORE the browse
 	// loop runs. Self presence is registry-driven, not browse-driven: on Windows
 	// the host frequently does not loop its own multicast back to the browsing
@@ -983,15 +988,17 @@ func (d *daemon) publishSelfLocked() {
 // live A records, a stale value would misroute them. netmon debounces, so a reload per
 // change is cheap. Best-effort: if the monitor can't start, ip= stays static
 // (the responder's A records still refresh on their own netmon watch).
-func (d *daemon) watchAddress(ctx context.Context) {
-	mon, err := netmon.Watch(ctx)
-	if err != nil {
-		slog.Warn("network monitor unavailable; advertised ip= is static", "err", err)
-		return
-	}
+func (d *daemon) watchAddress(mon *netmon.Monitor) {
 	for range mon.Subscribe() {
 		d.reloadIdentity()
 	}
+}
+
+func (d *daemon) peerChanged() func() <-chan struct{} {
+	if d.mon == nil {
+		return nil
+	}
+	return d.mon.Changed
 }
 
 // reachableTimeout bounds each liveness probe attempt (node-info GET or em TCP).
