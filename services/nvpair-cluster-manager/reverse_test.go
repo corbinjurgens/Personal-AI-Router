@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,109 @@ import (
 	"nvpair-shared/reach"
 	"nvpair-shared/splitlisten"
 )
+
+type reverseStatsLogWriter struct{ lines chan []byte }
+
+func (w reverseStatsLogWriter) Write(p []byte) (int, error) {
+	w.lines <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+func TestReverseSetupStatsCountRounds(t *testing.T) {
+	old := clustertrust.DefaultPeerStats
+	stats := clustertrust.NewPeerStats()
+	clustertrust.DefaultPeerStats = stats
+	t.Cleanup(func() { clustertrust.DefaultPeerStats = old })
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	pairReverseManagers(t, a, b)
+	closedAddress := func() (string, int) {
+		t.Helper()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := listener.Addr().String()
+		port := listener.Addr().(*net.TCPAddr).Port
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return addr, port
+	}
+	first, firstPort := closedAddress()
+	last, lastPort := closedAddress()
+	node, ok := a.memberByUUID(b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("missing peer")
+	}
+	node = cloneClusterNode(node)
+	node.Port = firstPort
+	a.browser = newBrowser()
+	a.browser.seed(node.NodeUUID, "127.0.0.1", lastPort)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := a.dialReverseSession(ctx, *node)
+	if err == nil || !strings.Contains(err.Error(), first) || !strings.Contains(err.Error(), last) {
+		t.Fatalf("round did not fail at both addresses: %v", err)
+	}
+	logs := make(chan []byte, 1)
+	logCtx, logCancel := context.WithCancel(context.Background())
+	logDone := make(chan struct{})
+	go func() {
+		defer close(logDone)
+		stats.Log(logCtx, slog.New(slog.NewJSONHandler(reverseStatsLogWriter{logs}, nil)), time.Millisecond)
+	}()
+	defer func() { logCancel(); <-logDone }()
+	var line struct {
+		Deltas []struct {
+			Peer    string `json:"peer"`
+			Counter string `json:"counter"`
+			Stage   string `json:"stage"`
+			Value   int64  `json:"value"`
+		} `json:"deltas"`
+	}
+	select {
+	case data := <-logs:
+		if err := json.Unmarshal(data, &line); err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("missing counter log")
+	}
+	if len(line.Deltas) != 2 {
+		t.Fatalf("deltas = %+v, want only round and failure", line.Deltas)
+	}
+	for _, d := range line.Deltas {
+		if d.Peer != node.NodeUUID || d.Value != 1 {
+			t.Fatalf("delta = %+v", d)
+		}
+		switch d.Counter {
+		case "reverse_setup_rounds":
+			if d.Stage != "" {
+				t.Errorf("round stage = %q", d.Stage)
+			}
+		case "reverse_setup_failures":
+			if d.Stage != "dial" {
+				t.Errorf("failure stage = %q, want dial", d.Stage)
+			}
+		default:
+			t.Errorf("setup round changed logical dial counter: %+v", d)
+		}
+	}
+}
+
+func TestReverseSetupStage(t *testing.T) {
+	for _, tc := range []struct{ stage, want string }{
+		{"dial", "dial"}, {"TLS handshake", "tls"},
+		{"upgrade request", "upgrade"}, {"upgrade response", "upgrade"}, {"upgrade", "upgrade"},
+		{"handoff", "handoff"}, {"setup", "setup"},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			if got := reverseSetupStage(tc.stage); got != tc.want {
+				t.Fatalf("stage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 // reverseRouteFixture gives the raw walk a silent recorded endpoint and a
 // fixture-owned working discovery endpoint. The chooser's dial describes a

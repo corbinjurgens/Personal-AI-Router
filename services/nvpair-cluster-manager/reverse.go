@@ -512,11 +512,19 @@ func (m *Manager) handleReverseUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) error {
+func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) (roundErr error) {
 	peer, ok := m.reversePeer(node.NodeUUID)
 	if !ok {
 		return errors.New("peer not admitted")
 	}
+	stats := clustertrust.DefaultPeerStats
+	stats.ReverseSetupRound(peer.UUID)
+	failedStage := "setup"
+	defer func() {
+		if roundErr != nil {
+			stats.ReverseSetupFailed(peer.UUID, failedStage)
+		}
+	}()
 	der, ok := m.trust.DER(peer.UUID)
 	if !ok {
 		return errors.New("peer not pinned")
@@ -541,6 +549,7 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 		conn, err := (&net.Dialer{}).DialContext(setup, "tcp", addr)
 		if err != nil {
 			cancel()
+			failedStage = "dial"
 			failures = append(failures, reverseAttemptFailure(addr, "dial", err))
 			reportFailure(addr)
 			continue
@@ -578,6 +587,7 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 			stage = "handoff"
 			_, err = io.ReadFull(reader, remaining)
 			if err == nil {
+				failedStage = "register"
 				err = m.reverse.manager.Register(peer, &reverseBufferedConn{tlsConn, io.MultiReader(bytes.NewReader(remaining), tlsConn)}, m.identity.NodeUUID, hex.EncodeToString(id[:]))
 				if err == nil {
 					slog.Info("reverse session established", "peer", peer.UUID, "direction", "outbound", "addr", addr)
@@ -590,6 +600,7 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 		if err == nil {
 			stage, err = "setup", errors.New("setup budget expired")
 		}
+		failedStage = reverseSetupStage(stage)
 		failures = append(failures, reverseAttemptFailure(addr, stage, err))
 		reportFailure(addr)
 	}
@@ -597,6 +608,19 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 		return errors.New("peer has no known address")
 	}
 	return errors.New(strings.Join(failures, "; "))
+}
+
+func reverseSetupStage(stage string) string {
+	switch stage {
+	case "TLS handshake":
+		return "tls"
+	case "upgrade request", "upgrade response", "upgrade":
+		return "upgrade"
+	case "dial", "handoff", "setup":
+		return stage
+	default:
+		return "setup"
+	}
 }
 
 // responseReadFailure keeps a transport error but replaces a parser error with

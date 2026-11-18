@@ -415,6 +415,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.cancel = cancel
 	m.joinContext = ctx
 	defer cancel()
+	go clustertrust.DefaultPeerStats.Log(ctx, slog.Default(), 15*time.Minute)
 	m.startNetworkWatch(ctx)
 	defer m.peerServices.CloseIdle()
 	defer m.removalPeerServices.CloseIdle()
