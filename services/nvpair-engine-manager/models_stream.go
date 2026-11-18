@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"nvpair-shared/clustertrust"
@@ -27,13 +28,14 @@ const modelsEventsPath = modelsPath + "/events"
 // tests can shorten it; production never changes it.
 var modelsStreamKeepalive = 10 * time.Second
 
+// modelsRebuildEvery catches changes no engine:models-changed names, such as
+// a policy push or download progress. A var so tests can shorten the period.
+var modelsRebuildEvery = 15 * time.Second
+
 const (
 	// modelsStreamIdle is how long a subscriber waits for a line before it
 	// drops the stream; peers use the same value.
 	modelsStreamIdle = 25 * time.Second
-	// modelsRebuildEvery catches changes no engine:models-changed names, such
-	// as a policy push or download progress.
-	modelsRebuildEvery = 15 * time.Second
 	// modelsRebuildDelay coalesces a burst of engine:models-changed emissions.
 	modelsRebuildDelay = 250 * time.Millisecond
 	// modelsBuildTimeout bounds one inventory build.
@@ -41,14 +43,31 @@ const (
 )
 
 // modelsPublisher rebuilds the model inventory document and publishes it when
-// its normalized form changes.
+// its normalized form changes, only while a peer reads it.
 type modelsPublisher struct {
-	hub    clustertrust.SnapshotHub[json.RawMessage]
-	notify chan struct{}
+	hub     clustertrust.SnapshotHub[json.RawMessage]
+	notify  chan struct{}
+	readers atomic.Int64
 }
 
 func newModelsPublisher() *modelsPublisher {
-	return &modelsPublisher{notify: make(chan struct{}, 1)}
+	return &modelsPublisher{
+		hub:    clustertrust.SnapshotHub[json.RawMessage]{RetainWhileRead: true},
+		notify: make(chan struct{}, 1),
+	}
+}
+
+// subscribe adds a reader and requests a fresh rebuild without waiting for it.
+// Readers joining after idle receive no seed from the previous reader epoch.
+func (p *modelsPublisher) subscribe() (<-chan json.RawMessage, func(), bool) {
+	p.readers.Add(1)
+	ch, cancel, ok := p.hub.Subscribe()
+	if !ok {
+		p.readers.Add(-1)
+		return nil, func() {}, false
+	}
+	p.signal()
+	return ch, func() { cancel(); p.readers.Add(-1) }, true
 }
 
 // signal asks for a rebuild after modelsRebuildDelay. It never blocks.
@@ -63,10 +82,15 @@ func (p *modelsPublisher) signal() {
 }
 
 // run rebuilds at start, every modelsRebuildEvery and modelsRebuildDelay after
-// each signal until ctx ends. build is Executor.ModelsResult.
+// each signal until ctx ends, only while subscribed. build is Executor.ModelsResult.
 func (p *modelsPublisher) run(ctx context.Context, build func(context.Context) ModelsResult) {
 	var last []byte
+	var lastEpoch uint64
 	rebuild := func() {
+		if p.readers.Load() == 0 {
+			return
+		}
+		epoch := p.hub.Epoch()
 		buildCtx, cancel := context.WithTimeout(ctx, modelsBuildTimeout)
 		res := build(buildCtx)
 		cancel()
@@ -79,11 +103,12 @@ func (p *modelsPublisher) run(ctx context.Context, build func(context.Context) M
 			return
 		}
 		normalized, err := json.Marshal(normalizedModelsResult(res))
-		if err != nil || bytes.Equal(normalized, last) {
+		if err != nil || (epoch == lastEpoch && bytes.Equal(normalized, last)) {
 			return
 		}
-		last = normalized
-		p.hub.Publish(json.RawMessage(full))
+		if p.hub.PublishAt(epoch, json.RawMessage(full)) {
+			last, lastEpoch = normalized, epoch
+		}
 	}
 	rebuild()
 	ticker := time.NewTicker(modelsRebuildEvery)
@@ -139,7 +164,7 @@ func modelsStreamHandler(mesh *clustertrust.Mesh, pub *modelsPublisher) http.Han
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		ch, closeSub, ok := pub.hub.Subscribe()
+		ch, closeSub, ok := pub.subscribe()
 		if !ok {
 			http.Error(w, "too many model streams", http.StatusServiceUnavailable)
 			return

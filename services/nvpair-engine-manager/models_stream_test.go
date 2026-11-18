@@ -183,8 +183,8 @@ func TestModelsStream(t *testing.T) {
 		builder := &modelsBuilder{}
 		builder.set(ModelsResult{Models: []string{"a"}, ByEngine: map[string][]string{"llamacpp": {"a"}}})
 		f := newModelsStreamFixture(t, builder)
-		waitBuilds(t, builder, 1)
 		lines := f.openStream(t)
+		waitBuilds(t, builder, 1)
 		line, ok := nextFrame(t, lines, 2*time.Second)
 		if !ok {
 			t.Fatal("no current document on connect")
@@ -218,8 +218,8 @@ func TestModelsStream(t *testing.T) {
 		}
 		builder.set(withEntry(freshnessEntry(10, 1)))
 		f := newModelsStreamFixture(t, builder)
-		waitBuilds(t, builder, 1)
 		lines := f.openStream(t)
+		waitBuilds(t, builder, 1)
 		line, ok := nextFrame(t, lines, 2*time.Second)
 		if !ok {
 			t.Fatal("no current document on connect")
@@ -253,8 +253,8 @@ func TestModelsStream(t *testing.T) {
 		builder := &modelsBuilder{}
 		builder.set(ModelsResult{Models: []string{"a"}})
 		f := newModelsStreamFixture(t, builder)
-		waitBuilds(t, builder, 1)
 		lines := f.openStream(t)
+		waitBuilds(t, builder, 1)
 		if _, ok := nextFrame(t, lines, 2*time.Second); !ok {
 			t.Fatal("no current document on connect")
 		}
@@ -319,4 +319,89 @@ func TestModelsStreamSignalNeverBlocks(t *testing.T) {
 	}
 	var nilPub *modelsPublisher
 	nilPub.signal()
+}
+
+func runModelsTestPublisher(t *testing.T, builder *modelsBuilder) *modelsPublisher {
+	t.Helper()
+	p := newModelsPublisher()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.run(ctx, builder.build) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return p
+}
+
+func nextPublishedModels(t *testing.T, ch <-chan json.RawMessage) ModelsResult {
+	t.Helper()
+	select {
+	case raw := <-ch:
+		return decodeModels(t, string(raw))
+	case <-time.After(2 * time.Second):
+		t.Fatal("no model inventory within 2 s")
+		return ModelsResult{}
+	}
+}
+
+func TestModelsPublisherDoesNotBuildWithoutReaders(t *testing.T) {
+	saved := modelsRebuildEvery
+	modelsRebuildEvery = 20 * time.Millisecond
+	t.Cleanup(func() { modelsRebuildEvery = saved })
+	builder := &modelsBuilder{}
+	p := runModelsTestPublisher(t, builder)
+	p.signal()
+	time.Sleep(3*modelsRebuildEvery + 20*time.Millisecond)
+	if got := builder.buildCount(); got != 0 {
+		t.Fatalf("built %d times without readers, want 0", got)
+	}
+}
+
+func TestModelsPublisherIdleReaderGetsUnchangedInventory(t *testing.T) {
+	builder := &modelsBuilder{}
+	builder.set(ModelsResult{Models: []string{"same"}})
+	p := runModelsTestPublisher(t, builder)
+	ch, cancel, ok := p.subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	if got := nextPublishedModels(t, ch); len(got.Models) != 1 || got.Models[0] != "same" {
+		t.Fatalf("first inventory = %+v, want [same]", got)
+	}
+	cancel()
+	before := builder.buildCount()
+	ch, cancel, ok = p.subscribe()
+	if !ok {
+		t.Fatal("resubscribe refused")
+	}
+	defer cancel()
+	if got := nextPublishedModels(t, ch); len(got.Models) != 1 || got.Models[0] != "same" {
+		t.Fatalf("inventory after idle = %+v, want [same]", got)
+	}
+	if builder.buildCount() <= before {
+		t.Fatal("reader after idle received no fresh build")
+	}
+}
+
+func TestModelsPublisherAdditionalReaderGetsCurrentFrame(t *testing.T) {
+	builder := &modelsBuilder{}
+	builder.set(ModelsResult{Models: []string{"current"}})
+	p := runModelsTestPublisher(t, builder)
+	first, cancelFirst, ok := p.subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	defer cancelFirst()
+	nextPublishedModels(t, first)
+	second, cancelSecond, ok := p.subscribe()
+	if !ok {
+		t.Fatal("second subscribe refused")
+	}
+	defer cancelSecond()
+	select {
+	case raw := <-second:
+		if got := decodeModels(t, string(raw)); len(got.Models) != 1 || got.Models[0] != "current" {
+			t.Fatalf("seed = %+v, want [current]", got)
+		}
+	default:
+		t.Fatal("additional reader did not receive the current frame at once")
+	}
 }
