@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -908,6 +909,49 @@ func TestReturnVerificationFailureMakesAddressSuspect(t *testing.T) {
 	defer c.mu.Unlock()
 	if len(c.suspect) != 0 {
 		t.Fatal("network change did not clear all suspect addresses")
+	}
+}
+
+func TestReturnChecksNextCandidateAfterVerificationFailure(t *testing.T) {
+	const secondLAN = "192.168.0.222:443"
+	candidates := []string{returnLAN, secondLAN, returnVPN}
+	f := newFakeNet(returnVPN)
+	var checked []string
+	var deadline time.Time
+	c := NewChooser(WithDial(f.dial), WithVerify(func(ctx context.Context, _, address string) error {
+		got, ok := ctx.Deadline()
+		if !ok {
+			t.Error("verification lacks a deadline")
+		}
+		if len(checked) == 0 {
+			deadline = got
+		} else if !deadline.Equal(got) {
+			t.Errorf("verification deadline changed from %v to %v", deadline, got)
+		}
+		checked = append(checked, address)
+		if address == returnLAN {
+			return errors.New("wrong pin")
+		}
+		return nil
+	}))
+	if got := choose(c, "peer", candidates); got != returnVPN {
+		t.Fatalf("initial choice = %q, want %q", got, returnVPN)
+	}
+	f.mu.Lock()
+	f.accept[returnLAN], f.accept[secondLAN] = true, true
+	f.mu.Unlock()
+	choose(c, "peer", candidates)
+	waitReturn(t, c)
+	if got := choose(c, "peer", candidates); got != secondLAN {
+		t.Errorf("choice after return check = %q, want %q", got, secondLAN)
+	}
+	if want := candidates[:2]; !slices.Equal(checked, want) {
+		t.Errorf("verified addresses = %v, want %v", checked, want)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.now().Before(c.suspect["peer"][returnLAN]) {
+		t.Error("failed candidate was not marked suspect")
 	}
 }
 

@@ -555,12 +555,25 @@ func (c *Chooser) startReturn(key string, candidates []string) {
 }
 
 func (c *Chooser) checkReturn(key, old string, candidates []string, token *returnToken) {
-	winner, ok := first(context.Background(), c.dial, candidates, c.timeout)
-	var err error
-	if ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err = c.verify(ctx, key, winner)
-		cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var winner string
+	var failed []string
+	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, ok := first(ctx, c.dial, []string{candidate}, c.timeout); !ok {
+			continue
+		}
+		if err := c.verify(ctx, key, candidate); err != nil {
+			failed = append(failed, candidate)
+			continue
+		}
+		if ctx.Err() == nil {
+			winner = candidate
+		}
+		break
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -572,11 +585,12 @@ func (c *Chooser) checkReturn(key, old string, candidates []string, token *retur
 	if c.generation[key] != token.generation || c.published[key] != token.fingerprint || c.networkEpoch != token.networkEpoch {
 		return
 	}
-	if ok && err == nil {
+	for _, candidate := range failed {
+		c.markSuspect(key, candidate)
+	}
+	if winner != "" {
 		c.cache[key] = choice{fingerprint: token.fingerprint, address: winner, settled: true, at: c.now()}
 		slog.Info("reach: returned to a better address", "key", key, "old", old, "new", winner)
-	} else if ok {
-		c.markSuspect(key, winner)
 	}
 	c.nextReturn[key] = c.now().Add(ReturnCheckEvery)
 }
