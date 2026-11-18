@@ -292,7 +292,9 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 			return info, nil
 		},
 		OnFrame: func(info NodeInfoResponse) error {
-			d.applyNodeInfoFrame(hostUUID, port, id, info, current)
+			if !d.applyNodeInfoFrame(hostUUID, port, id, info, current) {
+				return context.Canceled
+			}
 			return nil
 		},
 		OnKeepalive: func() { d.reemitNodeInfoKeepalive(hostUUID, id) },
@@ -303,12 +305,12 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 
 // applyNodeInfoFrame runs a frame through the pulled sample's apply path, caches
 // it for discovery:get-node-info, and applies the peer's reported membership.
-func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info NodeInfoResponse, current func() bool) {
+func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info NodeInfoResponse, current func() bool) bool {
 	s := &d.nodeInfoStreams
 	s.mu.Lock()
 	if stream, active := s.active[hostUUID]; !active || stream.id != id {
 		s.mu.Unlock()
-		return
+		return false
 	}
 
 	boot, clockErr := telemetryClock()
@@ -334,6 +336,7 @@ func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info N
 	if changed {
 		logReportedClusterIdentity(node, err)
 	}
+	return true
 }
 
 // reemitNodeInfoKeepalive re-emits the last frame's utilization as a new

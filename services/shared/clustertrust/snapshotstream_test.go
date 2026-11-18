@@ -5,6 +5,7 @@ package clustertrust
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,56 @@ import (
 
 type streamFrame struct {
 	N int `json:"n"`
+}
+
+func TestSnapshotStreamAcceptanceReceipt(t *testing.T) {
+	const body = "{\"fixture\":\"unlogged payload\"}"
+	const peer = "00000000-0000-4000-8000-000000000081"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	start := time.Now().UTC()
+	for _, kind := range []string{"peer-state", "node-info", "engines", "models"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := ReadSnapshotStream(ctx, cancel, strings.NewReader("null\n"+body+"\n"+body+"\n"), SnapshotStreamClient[json.RawMessage]{
+			Kind: kind, Peer: peer, Idle: time.Second, MaxLine: 4096,
+			Current: func() bool { return true },
+			Decode:  func(b []byte) (json.RawMessage, error) { return append(json.RawMessage(nil), b...), nil },
+			OnFrame: func(json.RawMessage) error { return nil },
+		})
+		if err != nil {
+			t.Fatalf("read %s: %v", kind, err)
+		}
+	}
+	end := time.Now().UTC()
+	seen := make(map[string]int)
+	for line := range strings.Lines(logs.String()) {
+		if !strings.Contains(line, "peer snapshot received") {
+			continue
+		}
+		if strings.Contains(line, "unlogged payload") {
+			t.Fatal("receipt logged the frame payload")
+		}
+		_, rest, ok := strings.Cut(line, "kind=")
+		kind, at, split := strings.Cut(rest, " peer="+peer+" received_at=")
+		stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(at))
+		// TextHandler formats time attributes to milliseconds.
+		if !ok || !split || err != nil || stamp.Before(start.Truncate(time.Millisecond)) || stamp.After(end) || stamp.Location() != time.UTC {
+			t.Fatalf("invalid UTC receipt line: %s", line)
+		}
+		seen[kind]++
+		t.Log(strings.TrimSpace(line))
+	}
+	for _, kind := range []string{"peer-state", "node-info", "engines"} {
+		if seen[kind] != 1 {
+			t.Errorf("%s receipts = %d, want 1 for two consecutive frames and a keepalive", kind, seen[kind])
+		}
+	}
+	if seen["models"] != 0 {
+		t.Error("models stream emitted an acceptance receipt")
+	}
 }
 
 func TestSnapshotStreamPeerStatsAcrossIntervals(t *testing.T) {

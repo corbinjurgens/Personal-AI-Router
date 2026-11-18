@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -157,6 +158,8 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 		}()
 	}
 	var first, last time.Time
+	var nextReceipt time.Time
+	traceReceipts := c.Peer != "" && (c.Kind == "peer-state" || c.Kind == "node-info" || c.Kind == "engines")
 	defer func() {
 		mu.Lock()
 		if reason != "" {
@@ -229,6 +232,13 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 		}
 		if first.IsZero() {
 			first = last
+		}
+		if traceReceipts && slog.Default().Enabled(ctx, slog.LevelDebug) {
+			receivedAt := time.Now().UTC()
+			if !receivedAt.Before(nextReceipt) {
+				slog.DebugContext(ctx, "peer snapshot received", "kind", c.Kind, "peer", c.Peer, "received_at", receivedAt)
+				nextReceipt = receivedAt.Add(5 * time.Second)
+			}
 		}
 	}
 	if ctx.Err() != nil {
