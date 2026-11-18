@@ -10,6 +10,29 @@ import (
 	"testing"
 )
 
+func TestClass(t *testing.T) {
+	for _, tc := range []struct {
+		address string
+		want    int
+	}{
+		{"192.168.1.2", scorePrivate},
+		{"192.168.1.2:14321", scorePrivate},
+		{"100.64.1.2", scoreCGNAT},
+		{"100.64.1.2:14321", scoreCGNAT},
+		{"peer.example:14321", scoreUnparseable},
+		{"[fd00::2]:14321", scoreIPv6ULA},
+	} {
+		t.Run(tc.address, func(t *testing.T) {
+			if got := Class(tc.address); got != tc.want {
+				t.Fatalf("Class(%q) = %d, want %d", tc.address, got, tc.want)
+			}
+		})
+	}
+	if Class("192.168.1.2") <= Class("100.64.1.2") || Class("peer.example") >= Class("100.64.1.2") {
+		t.Fatal("private, CGNAT and unparseable classes are not ordered")
+	}
+}
+
 func TestSharedOverlayAddresses(t *testing.T) {
 	tests := []struct {
 		name   string

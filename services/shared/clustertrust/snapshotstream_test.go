@@ -10,16 +10,77 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 type streamFrame struct {
 	N int `json:"n"`
+}
+
+func TestSnapshotStreamPeerStatsAcrossIntervals(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		stats := isolatedPeerStats(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		logCtx, logCancel := context.WithCancel(context.Background())
+		defer logCancel()
+		var logs peerStatsLogWriter
+		go stats.Log(logCtx, slog.New(slog.NewJSONHandler(&logs, nil)), 50*time.Millisecond)
+		reader, writer := io.Pipe()
+		defer reader.Close()
+		defer writer.Close()
+		done := make(chan StreamOutcome, 1)
+		go func() {
+			out, err := ReadSnapshotStream(ctx, cancel, reader, SnapshotStreamClient[streamFrame]{
+				Kind: "models", Peer: "peer", Idle: time.Second, MaxLine: 4096,
+				Current: func() bool { return true },
+				Decode:  func(b []byte) (streamFrame, error) { var f streamFrame; err := json.Unmarshal(b, &f); return f, err },
+				OnFrame: func(streamFrame) error { return nil },
+			})
+			if err != nil {
+				t.Errorf("read stream: %v", err)
+			}
+			done <- out
+		}()
+		synctest.Wait()
+		for i, line := range []string{"null\n", "{\"n\":1}\n"} {
+			if _, err := io.WriteString(writer, line); err != nil {
+				t.Fatal(err)
+			}
+			synctest.Wait()
+			time.Sleep(50 * time.Millisecond)
+			synctest.Wait()
+			if len(logs.lines) != i+1 {
+				t.Fatalf("interval %d log lines = %d", i, len(logs.lines))
+			}
+			assertPeerStat(t, decodePeerStatsLog(t, logs.lines[i]).Deltas, peerStatKey{Peer: "peer", Counter: "stream_bytes", Kind: "models"}, int64(len(line)-1))
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		out := <-done
+		if out.End != StreamEndEOF {
+			t.Fatalf("end = %s", out.End)
+		}
+		time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
+		if len(logs.lines) != 3 {
+			t.Fatalf("final log lines = %d", len(logs.lines))
+		}
+		last := decodePeerStatsLog(t, logs.lines[2])
+		assertPeerStat(t, last.Deltas, peerStatKey{Peer: "peer", Counter: "stream_bytes", Kind: "models"}, 0)
+		assertPeerStat(t, last.Deltas, peerStatKey{Peer: "peer", Counter: "streams_ended", Kind: "models", Reason: string(out.End)}, 1)
+		if len(last.Gauges) != 1 || last.Gauges[0].Live != 0 {
+			t.Fatalf("gauges = %+v", last.Gauges)
+		}
+	})
 }
 
 // openStream starts handler on a loopback test server and opens one GET
@@ -156,7 +217,7 @@ func TestServeSnapshotStream(t *testing.T) {
 		waitEnd(t, lines, time.Second)
 		<-done
 		if got := calls.Load(); got != 3 {
-			t.Fatalf("Authorize calls = %d, want 3 (two frames, then refusal)", got)
+			t.Fatalf("Authorize calls = %d, want 3 (headers, one frame, then refusal)", got)
 		}
 	})
 
@@ -216,6 +277,40 @@ func TestServeSnapshotStream(t *testing.T) {
 	})
 }
 
+func TestServeSnapshotStreamSendsHeadersBeforeFirstFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ServeSnapshotStream(w, r, SnapshotStreamServer[streamFrame]{
+			Keepalive:    10 * time.Second,
+			WriteTimeout: time.Second,
+			Authorize:    func() bool { return true },
+			Updates:      make(chan streamFrame),
+		})
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	client := server.Client()
+	client.Transport = &http.Transport{ResponseHeaderTimeout: time.Second}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("headers did not arrive within 1 s: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("status/content type = %d/%q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	select {
+	case line := <-readLines(response.Body):
+		t.Fatalf("body sent a line before an update or keepalive: %q", line)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestReadSnapshotStream(t *testing.T) {
 	decode := func(b []byte) (streamFrame, error) {
 		var v streamFrame
@@ -239,7 +334,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		t.Helper()
 		ctx, cancel, response := openStream(t, handler)
 		result := make(chan error, 1)
-		go func() { result <- ReadSnapshotStream(ctx, cancel, response.Body, c) }()
+		go func() { _, err := ReadSnapshotStream(ctx, cancel, response.Body, c); result <- err }()
 		select {
 		case err := <-result:
 			if ctx.Err() == nil {
@@ -258,6 +353,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		}
 		var got []int
 		err := read(t, handler, SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Second, MaxLine: 1024, Current: allow, Decode: decode,
 			OnFrame: func(f streamFrame) error { got = append(got, f.N); return nil },
 		})
@@ -273,6 +369,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		stop := errors.New("rejected frame")
 		frames := 0
 		err := read(t, writeBody(`{"n":1}`, `{"n":2}`), SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Second, MaxLine: 1024, Current: allow, Decode: decode,
 			OnFrame: func(streamFrame) error { frames++; return stop },
 		})
@@ -287,6 +384,7 @@ func TestReadSnapshotStream(t *testing.T) {
 	t.Run("returns nil on a clean EOF", func(t *testing.T) {
 		handler := func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprintln(w, `{"n":1}`) }
 		err := read(t, handler, SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Second, MaxLine: 1024, Current: allow, Decode: decode,
 			OnFrame: func(streamFrame) error { return nil },
 		})
@@ -299,6 +397,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		var keepalives atomic.Int32
 		stop := errors.New("frame after keepalives")
 		err := read(t, writeBody("null", " null ", `{"n":9}`), SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Second, MaxLine: 1024, Current: allow,
 			Decode: func(b []byte) (streamFrame, error) {
 				if strings.TrimSpace(string(b)) == "null" {
@@ -320,6 +419,7 @@ func TestReadSnapshotStream(t *testing.T) {
 	t.Run("cancels when no line arrives within Idle", func(t *testing.T) {
 		start := time.Now()
 		err := read(t, writeBody("null"), SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: 100 * time.Millisecond, MaxLine: 1024, Current: allow, Decode: decode,
 			OnFrame: func(streamFrame) error { return nil },
 		})
@@ -353,6 +453,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		var keepalives atomic.Int32
 		start := time.Now()
 		err := read(t, handler, SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: 100 * time.Millisecond, Recheck: 20 * time.Millisecond, MaxLine: 1024,
 			Current: live.Load, Decode: decode,
 			OnFrame:     func(streamFrame) error { return nil },
@@ -377,6 +478,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		// goroutine can end the stream quickly.
 		start := time.Now()
 		err := read(t, writeBody(), SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Hour, Recheck: 20 * time.Millisecond, MaxLine: 1024,
 			Current: live.Load, Decode: decode,
 			OnFrame: func(streamFrame) error { return nil },
@@ -392,6 +494,7 @@ func TestReadSnapshotStream(t *testing.T) {
 	t.Run("checks Current before every line", func(t *testing.T) {
 		frames := 0
 		err := read(t, writeBody(`{"n":1}`), SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Second, MaxLine: 1024, Current: func() bool { return false }, Decode: decode,
 			OnFrame: func(streamFrame) error { frames++; return nil },
 		})
@@ -405,6 +508,7 @@ func TestReadSnapshotStream(t *testing.T) {
 
 	t.Run("ends on a line over MaxLine", func(t *testing.T) {
 		err := read(t, writeBody(`{"n":1,"pad":"`+strings.Repeat("x", 8192)+`"}`), SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Second, MaxLine: 4096, Current: allow, Decode: decode,
 			OnFrame: func(streamFrame) error { return nil },
 		})
@@ -416,6 +520,7 @@ func TestReadSnapshotStream(t *testing.T) {
 	t.Run("ends on a Decode error", func(t *testing.T) {
 		bad := errors.New("bad frame")
 		err := read(t, writeBody(`{"n":1}`), SnapshotStreamClient[streamFrame]{
+			Kind: "models", Peer: "peer",
 			Idle: time.Second, MaxLine: 1024, Current: allow,
 			Decode:  func([]byte) (streamFrame, error) { return streamFrame{}, bad },
 			OnFrame: func(streamFrame) error { return nil },
@@ -424,4 +529,193 @@ func TestReadSnapshotStream(t *testing.T) {
 			t.Fatalf("err = %v, want the Decode error", err)
 		}
 	})
+}
+
+func TestSnapshotStreamWallIdleOnChange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		age   time.Duration
+		lines bool
+		idle  bool
+	}{
+		{"sleep gap", 5 * time.Second, false, true},
+		{"recent line", 500 * time.Millisecond, false, false},
+		{"flowing lines", 0, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var clock atomic.Int64
+			clock.Store(time.Now().UnixNano())
+			oldNow := streamWallNow
+			streamWallNow = func() time.Time { return time.Unix(0, clock.Load()) }
+			defer func() { streamWallNow = oldNow }()
+			var changes testChanges
+			ready := make(chan struct{}, 8)
+			ctx, cancel, response := openStream(t, func(w http.ResponseWriter, r *http.Request) {
+				_ = http.NewResponseController(w).Flush()
+				if !tc.lines {
+					<-r.Context().Done()
+					return
+				}
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-ticker.C:
+						if _, err := fmt.Fprintln(w, "null"); err != nil {
+							return
+						}
+						if err := http.NewResponseController(w).Flush(); err != nil {
+							return
+						}
+					}
+				}
+			})
+			defer cancel()
+			result := make(chan StreamOutcome, 1)
+			go func() {
+				out, _ := ReadSnapshotStream(ctx, cancel, response.Body, SnapshotStreamClient[streamFrame]{
+					Kind: "models", Peer: "peer",
+					Idle: time.Second, MaxLine: 4096, Current: func() bool { return true },
+					Changed:     func() <-chan struct{} { ch := changes.Changed(); ready <- struct{}{}; return ch },
+					OnKeepalive: func() { ready <- struct{}{} },
+				})
+				result <- out
+			}()
+			<-ready
+			if tc.lines {
+				<-ready
+			}
+			clock.Add(int64(tc.age))
+			changes.notify()
+			<-ready // watcher captured next generation
+			if tc.idle {
+				select {
+				case out := <-result:
+					if out.End != StreamEndIdle {
+						t.Fatalf("end = %s", out.End)
+					}
+				case <-time.After(200 * time.Millisecond):
+					t.Fatal("wake did not end idle stream")
+				}
+			} else {
+				select {
+				case out := <-result:
+					t.Fatalf("healthy stream ended: %+v", out)
+				case <-time.After(200 * time.Millisecond):
+				}
+				cancel()
+				<-result
+			}
+		})
+	}
+}
+
+func TestSnapshotStreamOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		body                string
+		current             bool
+		decodeErr, frameErr error
+		cancelled           bool
+		want                StreamEnd
+	}{
+		{name: "EOF", body: `{"n":1}` + "\n", current: true, want: StreamEndEOF},
+		{name: "decode", body: "bad\n", current: true, decodeErr: errors.New("decode"), want: StreamEndDecode},
+		{name: "refused", body: "{}\n", current: true, frameErr: errors.New("refused"), want: StreamEndRefused},
+		{name: "authority", body: "{}\n", want: StreamEndAuthority},
+		{name: "cancelled", body: "{}\n", current: true, cancelled: true, want: StreamEndCancelled},
+		{name: "error", body: strings.Repeat("x", 8192), current: true, want: StreamEndError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancelled {
+				cancel()
+			}
+			out, _ := ReadSnapshotStream(ctx, cancel, strings.NewReader(tc.body), SnapshotStreamClient[streamFrame]{
+				Kind: "models", Peer: "peer",
+				Idle: time.Second, MaxLine: 4096, Current: func() bool { return tc.current },
+				Decode:  func([]byte) (streamFrame, error) { return streamFrame{}, tc.decodeErr },
+				OnFrame: func(streamFrame) error { return tc.frameErr },
+			})
+			if out.End != tc.want || out.Healthy != 0 {
+				t.Fatalf("outcome = %+v, want %s with zero duration", out, tc.want)
+			}
+		})
+	}
+}
+
+func TestSnapshotStreamHealthyExcludesTrailingSilence(t *testing.T) {
+	ctx, cancel, response := openStream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintln(w, "{}")
+		_ = http.NewResponseController(w).Flush()
+		time.Sleep(10 * time.Millisecond)
+		_, _ = fmt.Fprintln(w, "null")
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	})
+	out, err := ReadSnapshotStream(ctx, cancel, response.Body, SnapshotStreamClient[streamFrame]{
+		Kind: "models", Peer: "peer",
+		Idle: 25 * time.Millisecond, MaxLine: 4096, Current: func() bool { return true },
+		Decode: func([]byte) (streamFrame, error) { return streamFrame{}, nil }, OnFrame: func(streamFrame) error { return nil },
+	})
+	if !errors.Is(err, context.Canceled) || out.End != StreamEndIdle {
+		t.Fatalf("outcome/error = %+v / %v", out, err)
+	}
+	if out.Healthy < 5*time.Millisecond || out.Healthy >= 25*time.Millisecond {
+		t.Fatalf("healthy = %v, want about 10ms", out.Healthy)
+	}
+}
+
+func TestSnapshotStreamBufferedLineAfterIdle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	frames := 0
+	out, _ := ReadSnapshotStream(ctx, cancel, strings.NewReader("{}\n{}\n"), SnapshotStreamClient[streamFrame]{
+		Kind: "models", Peer: "peer",
+		Idle: 10 * time.Millisecond, MaxLine: 4096, Current: func() bool { return true },
+		Decode:  func([]byte) (streamFrame, error) { return streamFrame{}, nil },
+		OnFrame: func(streamFrame) error { frames++; <-ctx.Done(); return nil },
+	})
+	if out.End != StreamEndIdle || frames != 1 {
+		t.Fatalf("outcome/frames = %+v / %d", out, frames)
+	}
+}
+
+func TestSnapshotStreamAuthorityRecheckOutcome(t *testing.T) {
+	ctx, cancel, response := openStream(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	})
+	out, _ := ReadSnapshotStream(ctx, cancel, response.Body, SnapshotStreamClient[streamFrame]{
+		Kind: "models", Peer: "peer",
+		Idle: time.Second, Recheck: time.Millisecond, MaxLine: 4096, Current: func() bool { return false },
+	})
+	if out.End != StreamEndAuthority || out.Healthy != 0 {
+		t.Fatalf("outcome = %+v", out)
+	}
+}
+
+func TestSnapshotStreamErrorEndSurvivesCallerCancellation(t *testing.T) {
+	for _, end := range []StreamEnd{StreamEndDecode, StreamEndRefused} {
+		t.Run(string(end), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			bad := errors.New("frame error")
+			out, err := ReadSnapshotStream(ctx, cancel, strings.NewReader("{}\n"), SnapshotStreamClient[streamFrame]{
+				Kind: "models", Peer: "peer",
+				Idle: time.Second, MaxLine: 4096, Current: func() bool { return true },
+				Decode: func([]byte) (streamFrame, error) {
+					if end == StreamEndDecode {
+						cancel()
+						return streamFrame{}, bad
+					}
+					return streamFrame{}, nil
+				},
+				OnFrame: func(streamFrame) error { cancel(); return bad },
+			})
+			if out.End != end || !errors.Is(err, bad) {
+				t.Fatalf("outcome/error = %+v / %v", out, err)
+			}
+		})
+	}
 }

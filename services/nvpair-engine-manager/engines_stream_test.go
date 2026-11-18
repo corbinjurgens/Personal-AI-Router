@@ -121,17 +121,146 @@ func TestEnginesPublisherRebuildsOnlyWithReaders(t *testing.T) {
 		t.Fatalf("status refreshed after the last reader left: %d -> %d", before, n)
 	}
 
-	// A change made while no reader was open reaches the next reader through
-	// the rebuild it triggers. The stored list from before the idle period may
-	// come first, unless the rebuild replaced it before the reader took it.
+	// A change made while no reader was open is the next reader's first frame.
 	list.set(EngineStatus{Engine: "llamacpp", Installed: true, Running: true})
 	ch, closeSub, ok = p.subscribe()
 	if !ok {
 		t.Fatal("second subscribe refused")
 	}
 	defer closeSub()
-	if !running(ch) && !running(ch) {
+	if !running(ch) {
 		t.Fatal("rebuild after subscribe did not send the current list")
+	}
+}
+
+func nextPublishedEngine(t *testing.T, ch <-chan json.RawMessage) EngineStatus {
+	t.Helper()
+	select {
+	case raw := <-ch:
+		var frame struct {
+			Engines []EngineStatus `json:"engines"`
+		}
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatalf("decode engine frame: %v", err)
+		}
+		if len(frame.Engines) != 1 {
+			t.Fatalf("engines = %+v, want one", frame.Engines)
+		}
+		return frame.Engines[0]
+	case <-time.After(2 * time.Second):
+		t.Fatal("no engine frame within 2 s")
+		return EngineStatus{}
+	}
+}
+
+func TestEnginesPublisherIdleReaderGetsFreshList(t *testing.T) {
+	list := &enginesList{}
+	list.set(EngineStatus{Engine: "A"})
+	p := newEnginesPublisher()
+	p.list = list.get
+	ch, cancel, ok := p.subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	p.rebuild()
+	if got := nextPublishedEngine(t, ch); got.Engine != "A" {
+		t.Fatalf("first list = %+v, want A", got)
+	}
+	cancel()
+	list.set(EngineStatus{Engine: "B"})
+	ch, cancel, ok = p.subscribe()
+	if !ok {
+		t.Fatal("resubscribe refused")
+	}
+	defer cancel()
+	// Check before rebuilding so overwriting the channel cannot hide an old seed.
+	select {
+	case raw := <-ch:
+		t.Fatalf("received idle seed %s", raw)
+	default:
+	}
+	p.rebuild()
+	if got := nextPublishedEngine(t, ch); got.Engine != "B" {
+		t.Fatalf("first list after idle = %+v, want B", got)
+	}
+}
+
+func TestEnginesPublisherDiscardsRebuildFromBeforeIdle(t *testing.T) {
+	list := &enginesList{}
+	list.set(EngineStatus{Engine: "A"})
+	captured, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	p := newEnginesPublisher()
+	var calls atomic.Int32
+	p.list = func() []EngineStatus {
+		value := list.get()
+		if calls.Add(1) == 1 {
+			close(captured)
+			<-release
+		}
+		return value
+	}
+	_, cancel, ok := p.subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	go func() { defer close(done); p.rebuild() }()
+	t.Cleanup(func() { unblock(); <-done })
+	select {
+	case <-captured:
+	case <-time.After(time.Second):
+		t.Fatal("list did not capture A")
+	}
+	cancel()
+	list.set(EngineStatus{Engine: "B"})
+	ch, cancel, ok := p.subscribe()
+	if !ok {
+		t.Fatal("resubscribe refused")
+	}
+	defer cancel()
+	unblock()
+	<-done
+	select {
+	case raw := <-ch:
+		t.Fatalf("rebuild from before idle delivered %s", raw)
+	default:
+	}
+	p.rebuild()
+	if got := nextPublishedEngine(t, ch); got.Engine != "B" {
+		t.Fatalf("first list after idle = %+v, want B", got)
+	}
+}
+
+func TestEnginesPublisherSubscribeDoesNotWaitForRebuild(t *testing.T) {
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	p := newEnginesPublisher()
+	p.list = func() []EngineStatus { close(entered); <-release; return nil }
+	_, cancel, ok := p.subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	defer cancel()
+	go func() { defer close(done); p.rebuild() }()
+	t.Cleanup(func() { close(release); <-done })
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("rebuild did not enter list")
+	}
+	subscribed := make(chan bool, 1)
+	go func() {
+		_, cancel, ok := p.subscribe()
+		defer cancel()
+		subscribed <- ok
+	}()
+	select {
+	case ok := <-subscribed:
+		if !ok {
+			t.Fatal("concurrent subscribe refused")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("subscribe waited for rebuild")
 	}
 }
 

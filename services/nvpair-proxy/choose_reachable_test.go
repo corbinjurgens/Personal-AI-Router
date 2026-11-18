@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,93 @@ import (
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/reach"
 )
+
+func TestProxyLateFailureKeepsNewerAddress(t *testing.T) {
+	p, n, _ := confirmedDeadPeer(t, "192.0.2.22")
+	f := p.soleFacade()
+	f.targets = reach.NewChooser(reach.WithDial(func(string, string, time.Duration) (net.Conn, error) {
+		left, right := net.Pipe()
+		right.Close()
+		return left, nil
+	}))
+	candidates := nodeCandidates(n)
+	old, newer := candidates[0], candidates[1]
+	if got := f.targets.ChooseWithin(context.Background(), n.ID, candidates); got != old {
+		t.Fatalf("initial choice = %q", got)
+	}
+	var moved atomic.Bool
+	p.plainHTTPTransport().DialContext = func(context.Context, string, string) (net.Conn, error) {
+		f.targets.Forget(n.ID)
+		if got := f.targets.ChooseWithin(context.Background(), n.ID, []string{newer, old}); got != newer {
+			t.Errorf("new choice = %q", got)
+		}
+		moved.Store(true)
+		return nil, net.ErrClosed
+	}
+	rec := httptest.NewRecorder()
+	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama"}`)))
+	if rec.Code != http.StatusBadGateway || !moved.Load() {
+		t.Fatalf("status = %d, moved = %v", rec.Code, moved.Load())
+	}
+	if got := f.targets.ChooseWithin(context.Background(), n.ID, candidates); got != newer {
+		t.Fatalf("late proxy failure retired newer address: %q", got)
+	}
+}
+
+func TestProxyLaterRequestUsesVerifiedReturnAfterChange(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer server.Close()
+	n := nodeForModel(t, "peer", server.URL, "llama")
+	n.Addresses = []string{"100.64.1.2", "192.168.1.2"}
+	disc := NewDiscovery()
+	disc.AddManual(n)
+	p := testProxy(anyProfile(t), disc, 11435)
+	f := p.soleFacade()
+	var lanReady atomic.Bool
+	var checks atomic.Int32
+	var mu sync.Mutex
+	ch := make(chan struct{})
+	f.targets = reach.NewChooser(reach.WithChanged(func() <-chan struct{} {
+		mu.Lock()
+		defer mu.Unlock()
+		return ch
+	}), reach.WithDial(func(_, address string, _ time.Duration) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil || (host == "192.168.1.2" && !lanReady.Load()) {
+			return nil, net.ErrClosed
+		}
+		left, right := net.Pipe()
+		right.Close()
+		return left, nil
+	}), reach.WithVerify(func(_ context.Context, key, address string) error {
+		if key != n.ID || address != net.JoinHostPort("192.168.1.2", strconv.Itoa(n.Port)) {
+			return net.ErrClosed
+		}
+		checks.Add(1)
+		return nil
+	}))
+	waitForTarget(t, p, n, net.JoinHostPort("100.64.1.2", strconv.Itoa(n.Port)))
+	lanReady.Store(true)
+	mu.Lock()
+	close(ch)
+	ch = make(chan struct{})
+	mu.Unlock()
+	waitForTarget(t, p, n, net.JoinHostPort("192.168.1.2", strconv.Itoa(n.Port)))
+	var dialled atomic.Value
+	p.plainHTTPTransport().DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dialled.Store(address)
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	rec := httptest.NewRecorder()
+	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama"}`)))
+	want := net.JoinHostPort("192.168.1.2", strconv.Itoa(n.Port))
+	if rec.Code != http.StatusOK || dialled.Load() != want || checks.Load() == 0 {
+		t.Fatalf("status = %d, dialled = %v, checks = %d, want 200/%s with verification", rec.Code, dialled.Load(), checks.Load(), want)
+	}
+}
 
 // waitForTarget polls targetURL until it settles on want.
 //

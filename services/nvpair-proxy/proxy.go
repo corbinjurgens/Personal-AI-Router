@@ -326,6 +326,7 @@ type Proxy struct {
 	// watchLocalAddrs starts the host network monitor. Tests using synctest
 	// replace it before Run to keep real routing-socket reads out of the bubble.
 	watchLocalAddrs func(context.Context)
+	mon             interface{ Changed() <-chan struct{} }
 
 	// maxRequestBytes caps a buffered request body (see requestBodyLimit). Set
 	// from --max-request-bytes before serving; read-only afterwards.
@@ -424,15 +425,15 @@ func (p *Proxy) newRoutingHistory() *proxyRoutingHistory {
 func NewProxy(codec *Codec) *Proxy {
 	epoch := time.Now()
 	p := &Proxy{
-		watchLocalAddrs: startLocalAddrWatch,
-		codec:           codec,
-		runID:           newRunID(),
-		activity:        nodeactivity.NewReporter(activityReportInterval),
-		accounts:        newAccountLedger(),
-		egress:          newEgressLease(func() time.Duration { return time.Since(epoch) }),
-		performance:     performanceQueue{wake: make(chan struct{}, 1)},
+		codec:       codec,
+		runID:       newRunID(),
+		activity:    nodeactivity.NewReporter(activityReportInterval),
+		accounts:    newAccountLedger(),
+		egress:      newEgressLease(func() time.Duration { return time.Since(epoch) }),
+		performance: performanceQueue{wake: make(chan struct{}, 1)},
 	}
 	p.routing = &routingListener{host: p}
+	p.watchLocalAddrs = p.startLocalAddrWatch
 	p.newRoutingHistory()
 	capacity, wait, err := p.bufferSettings(nodepolicy.Default())
 	if err != nil {
@@ -523,6 +524,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	history := p.newRoutingHistory()
 	history.parent = ctx
 	defer cancel()
+	go clustertrust.DefaultPeerStats.Log(ctx, slog.Default(), 15*time.Minute)
 	historyDone := make(chan struct{})
 	go func() {
 		defer close(historyDone)
@@ -1258,13 +1260,14 @@ func isLocalAddress(addr string) bool {
 // startLocalAddrWatch keeps localAddrs in sync with the host's live interface
 // set for the lifetime of ctx. If the network monitor can't start, the set
 // stays at its initial enumeration rather than failing the proxy.
-func startLocalAddrWatch(ctx context.Context) {
+func (p *Proxy) startLocalAddrWatch(ctx context.Context) {
 	mon, err := netmon.Watch(ctx)
 	if err != nil {
 		slog.Warn("proxy: network monitor unavailable; local address set is static", "err", err)
 		return
 	}
 	setLocalAddrs(mon.LocalIPs())
+	p.mon = mon
 	ch := mon.Subscribe()
 	go func() {
 		for range ch {

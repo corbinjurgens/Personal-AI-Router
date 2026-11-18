@@ -798,7 +798,11 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 				if err := os.WriteFile(path, original, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				task1Eventually(t, "restored authenticated peer authority", 20*time.Second, func() bool {
+				// These sessions are shorter than the stable reset interval. A
+				// reverse reconnect and then an engine stream may each wait the
+				// jittered cap, plus setup and supervisor scheduling time.
+				recoveryWait := 2*(clustertrust.PeerRetryCap*12/10) + 20*time.Second
+				task1Eventually(t, "restored authenticated peer authority", recoveryWait, func() bool {
 					return f.call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}).Error == nil
 				})
 			})

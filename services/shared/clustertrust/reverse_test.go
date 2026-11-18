@@ -28,6 +28,200 @@ import (
 
 const reverseTestID = "11111111111111111111111111111111"
 
+func TestSessionCloseLabel(t *testing.T) {
+	for _, tc := range []struct{ reason, want string }{
+		{"session ended", "ended"},
+		{"session ended: EOF", "ended"},
+		{"replaced by duplicate session", "replaced"},
+		{"peer no longer admitted", "not-admitted"},
+		{"revoked", "revoked"},
+		{"reverse manager closed", "manager-closed"},
+		{"control stream setup failed: EOF", "control-failed"},
+		{"control stream read failed: EOF", "control-failed"},
+		{"peer exceeded the per-session stream limit", "protocol"},
+		{"stream rejected: capacity", "protocol"},
+		{"probe failed", "probe-failed"},
+		{"unknown failure", "other"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			if got := sessionCloseLabel(tc.reason); got != tc.want {
+				t.Fatalf("label = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReversePeerStatsSessionLifecycle(t *testing.T) {
+	stats := isolatedPeerStats(t)
+	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	reverseTestConnect(t, a, b, "a", reverseTestID)
+	if closed := a.Probe(); closed != 0 {
+		t.Fatalf("live probe closed %d sessions", closed)
+	}
+	a.Close()
+	b.Close()
+	deltas, gauges := stats.take()
+	for _, peer := range []string{"a", "b"} {
+		assertPeerStat(t, deltas, peerStatKey{Peer: peer, Counter: "sessions_up"}, 1)
+		var down, read, written int64
+		for _, d := range deltas {
+			if d.Peer != peer {
+				continue
+			}
+			if d.Counter == "sessions_down" {
+				down += d.Value
+			}
+			if d.View == "reverse-tunnel" && d.Counter == "bytes_read" {
+				read += d.Value
+			}
+			if d.View == "reverse-tunnel" && d.Counter == "bytes_written" {
+				written += d.Value
+			}
+		}
+		if down != 1 || read == 0 || written == 0 {
+			t.Fatalf("peer %s: down=%d read=%d written=%d", peer, down, read, written)
+		}
+	}
+	for _, g := range gauges {
+		if g.Live != 0 {
+			t.Errorf("closed session gauge = %+v", g)
+		}
+	}
+}
+
+func TestReverseProbeLivePair(t *testing.T) {
+	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	reverseTestConnect(t, a, b, "a", reverseTestID)
+	if closed := a.Probe(); closed != 0 || !a.Has(ReversePeer{"b", "v1"}) {
+		t.Fatalf("live probe closed=%d, registered=%v", closed, a.Has(ReversePeer{"b", "v1"}))
+	}
+}
+
+func TestReverseProbeBlackhole(t *testing.T) {
+	m := reverseTestManager(t, ReverseOptions{LocalUUID: "b", SetupTimeout: 200 * time.Millisecond})
+	_, conn := reverseTestPingPeer(t, m, nil)
+	conn.pause(t)
+	if closed := m.Probe(); closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	if m.Has(ReversePeer{"a", "v1"}) {
+		t.Fatal("blackholed session still registered")
+	}
+}
+
+func TestReverseProbeCannotCloseReplacement(t *testing.T) {
+	m := reverseTestManager(t, ReverseOptions{LocalUUID: "b", SetupTimeout: 200 * time.Millisecond})
+	pingSent := make(chan struct{}, 1)
+	_, conn := reverseTestPingPeer(t, m, func(conn net.Conn) net.Conn {
+		return &reverseTestProbeConn{Conn: conn, ping: pingSent}
+	})
+	conn.pause(t)
+	done := make(chan int, 1)
+	go func() { done <- m.Probe() }()
+	select {
+	case <-pingSent:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not start")
+	}
+	other := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+	// A lexically earlier session ID wins the duplicate tie-break.
+	reverseTestConnect(t, other, m, "a", "00000000000000000000000000000000")
+	if closed := <-done; closed != 1 {
+		t.Fatalf("closed = %d, want captured old session", closed)
+	}
+	if !m.Has(ReversePeer{"a", "v1"}) {
+		t.Fatal("late probe closed replacement")
+	}
+	if closed := m.Probe(); closed != 0 {
+		t.Fatalf("replacement probe closed %d", closed)
+	}
+}
+
+type reverseTestProbeConn struct {
+	net.Conn
+	ping chan<- struct{}
+}
+
+func (c *reverseTestProbeConn) Write(b []byte) (int, error) {
+	// yamux ping frames have type 2; the wrapper writes each frame header.
+	if len(b) >= 12 && b[1] == 2 && b[3]&1 != 0 {
+		select {
+		case c.ping <- struct{}{}:
+		default:
+		}
+	}
+	return c.Conn.Write(b)
+}
+
+func TestReverseSessionEndBeforeRemoval(t *testing.T) {
+	type ended struct {
+		peer              ReversePeer
+		up                time.Duration
+		replaced, present bool
+	}
+	ends := make(chan ended, 2)
+	var manager *ReverseManager
+	manager = reverseTestManager(t, ReverseOptions{LocalUUID: "a", OnSessionEnd: func(peer ReversePeer, up time.Duration, replaced bool) {
+		ends <- ended{peer, up, replaced, manager.Has(peer)}
+	}})
+	other := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	conn := reverseTestConnect(t, manager, other, "a", reverseTestID)
+	time.Sleep(5 * time.Millisecond)
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case end := <-ends:
+		if end.peer.UUID != "b" || end.replaced || !end.present || end.up < 5*time.Millisecond || end.up > time.Second {
+			t.Fatalf("session end = %+v", end)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing session end")
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case extra := <-ends:
+		t.Fatalf("extra end = %+v", extra)
+	default:
+	}
+}
+
+func TestReverseSessionEndDuplicate(t *testing.T) {
+	ends := make(chan bool, 3)
+	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a", OnSessionEnd: func(_ ReversePeer, _ time.Duration, replaced bool) { ends <- replaced }})
+	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	reverseTestConnect(t, a, b, "b", reverseTestID)
+	reverseTestConnect(t, a, b, "a", reverseTestID)
+	select {
+	case replaced := <-ends:
+		if !replaced {
+			t.Fatal("replaced session reported normal close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing replacement end")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case replaced := <-ends:
+		if replaced {
+			t.Fatal("winning session reported replacement")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing winner end")
+	}
+	select {
+	case extra := <-ends:
+		t.Fatalf("extra end = %v", extra)
+	default:
+	}
+}
+
 func reverseTestManager(t *testing.T, opts ReverseOptions) *ReverseManager {
 	t.Helper()
 	if opts.Validate == nil {

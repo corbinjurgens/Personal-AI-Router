@@ -699,6 +699,26 @@ scanner's self identity/addresses and current broker service registrations;
 neither roster entries nor reverse sessions establish service presence.
 The pinned direct/reverse client retains its normal transport policy.
 
+Reverse-session setup tries the chooser's TCP-confirmed address first, followed
+by the remaining resolved addresses. A cold confirmation is bounded by 2 s and
+probes candidates together; an unconfirmed silent address therefore does not
+consume the 5 s setup budget ahead of a working address. A previously confirmed
+address that later goes silent still consumes its setup budget before failover.
+Setup failures mark that specific chosen address suspect for 10 minutes, with
+suspect addresses tried last. A session registration refusal does not do this.
+
+While new connections use a lower-class address, the chooser can check a
+better-class published address in the background, after a network change or
+every 10 minutes while the peer is being dialled. Only a successful pinned mTLS
+handshake permits the return. Existing streams and sessions stay open.
+
+One process network monitor detects address changes and wall-clock sleep gaps
+over 15 s. A notification resets peer retry schedules, makes direct routes
+eligible again, and probes reverse sessions concurrently, closing only sessions
+whose ping fails. A peer-state stream reopens when its last line is at least its
+25 s idle limit old by wall time; a recently active stream stays open. Changes
+to a route or link that preserve every address are not detected.
+
 The descriptor keeps the scanner's canonical address first and appends missing,
 sorted IPv4 overlay hints from `netpick.SharedOverlayAddresses`. Its public
 address cap remains four: a full scanner list gives its last position to the
@@ -735,7 +755,10 @@ overwriting authenticated services. Valid service omission withdraws that
 service. Admission changes immediately invalidate old authority; unavailable
 routes do not renew the bounded metadata lifetime or remove membership.
 
-One stream per member stays open; reconnects use the member's backoff and
+One stream per member stays open; reconnects use the shared member backoff
+(jittered 1 s doubling to 30 s, growing to 5 min after 10 min of continuous
+failure, reset only after 30 s healthy). Reachability evidence expedites a retry
+without clearing failure history. Reconnects
 cover startup, restored admission, reverse availability and worker
 replacement. Each frame is bounded in size, and complete validation precedes
 atomic scanner application. Details and

@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nvpair-shared/netpick"
 )
 
 // DefaultTimeout bounds one candidate's connect attempt. It is generous for a LAN
@@ -157,6 +159,20 @@ func first(ctx context.Context, dial DialFunc, candidates []string, timeout time
 // discovery cycle, so recovery still needs no explicit Forget.
 const UnconfirmedCooldown = 5 * time.Second
 
+// SuspectFor is how long an address reported failed by ForgetAddr is tried
+// last, unless a network change clears it first.
+const SuspectFor = 10 * time.Minute
+
+// ReturnCheckEvery bounds how often an actively dialled peer's better-class
+// addresses are checked, unless a network change makes the check due sooner.
+const ReturnCheckEvery = 10 * time.Minute
+
+type returnToken struct {
+	generation   uint64
+	fingerprint  string
+	networkEpoch uint64
+}
+
 // choice is the address chosen for a node plus the candidate list it was chosen
 // from. The fingerprint is how a republished list is noticed at all; what happens
 // then depends on whether the address survived it (see reuse).
@@ -191,12 +207,10 @@ func (c choice) reuse(candidates []string, fingerprint string, now time.Time) (s
 // Chooser remembers which address worked for each node so a repeated dial costs
 // nothing. It is safe for concurrent use.
 //
-// The cache is deliberately not time-expiring. A confirmed address stops being
-// used for one of two concrete reasons — the caller reports a failure against it
-// (Forget), or the node stops publishing it — and both are observed events.
-// Re-probing on a timer would spend connections to learn nothing on the
-// overwhelmingly common stable-network path, and each swap it provoked would cost
-// a reconnect.
+// The stable-path cache never expires. While on a lower-class address, an
+// occasional background return check can replace it with a better-class address,
+// but only after an application-level verification. Working connections are
+// never replaced with an unverified address.
 type Chooser struct {
 	timeout time.Duration
 	dial    DialFunc
@@ -216,7 +230,16 @@ type Chooser struct {
 	// the address just retired, where it would stay: a settled entry never
 	// expires, and the failure that would have retired it has already been
 	// reported.
-	generation map[string]uint64
+	generation   map[string]uint64
+	suspect      map[string]map[string]time.Time
+	clock        func() time.Time
+	verify       func(context.Context, string, string) error
+	changed      func() <-chan struct{}
+	change       <-chan struct{}
+	networkEpoch uint64
+	published    map[string]string
+	returning    map[string]*returnToken
+	nextReturn   map[string]time.Time
 }
 
 // Option adjusts a Chooser at construction.
@@ -232,6 +255,19 @@ func WithDial(fn DialFunc) Option {
 	}
 }
 
+// WithVerify sets the application-level check the return check requires before
+// installing a better address. Without it the chooser never returns to a better
+// address on its own.
+func WithVerify(fn func(ctx context.Context, key, address string) error) Option {
+	return func(c *Chooser) { c.verify = fn }
+}
+
+// WithChanged sets the network change source. Each change clears suspect
+// addresses and makes every key's return check due.
+func WithChanged(fn func() <-chan struct{}) Option {
+	return func(c *Chooser) { c.changed = fn }
+}
+
 // NewChooser builds a Chooser with DefaultTimeout and real TCP dialing.
 func NewChooser(opts ...Option) *Chooser {
 	c := &Chooser{
@@ -240,9 +276,16 @@ func NewChooser(opts ...Option) *Chooser {
 		cache:      make(map[string]choice),
 		probing:    make(map[string]bool),
 		generation: make(map[string]uint64),
+		suspect:    make(map[string]map[string]time.Time),
+		published:  make(map[string]string),
+		returning:  make(map[string]*returnToken),
+		nextReturn: make(map[string]time.Time),
 	}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.changed != nil {
+		c.change = c.changed()
 	}
 	return c
 }
@@ -262,16 +305,19 @@ func NewChooser(opts ...Option) *Chooser {
 // has normally landed by the request after that. Waiting, by contrast, would put a
 // connect timeout in front of requests that had no need of one.
 func (c *Chooser) Prefer(key string, candidates []string) string {
+	fingerprint := strings.Join(candidates, "|")
+	c.mu.Lock()
+	c.observe(key, fingerprint)
 	if len(candidates) == 0 {
+		c.mu.Unlock()
 		return ""
 	}
 	if len(candidates) == 1 {
+		c.mu.Unlock()
 		return candidates[0]
 	}
-	fingerprint := strings.Join(candidates, "|")
-
-	c.mu.Lock()
-	if address, ok := c.reuse(key, candidates, fingerprint, time.Now()); ok {
+	if address, ok := c.reuse(key, candidates, fingerprint, c.now()); ok {
+		c.startReturn(key, candidates)
 		c.mu.Unlock()
 		return address
 	}
@@ -283,9 +329,9 @@ func (c *Chooser) Prefer(key string, candidates []string) string {
 	c.mu.Unlock()
 
 	if confirm {
-		go c.confirm(key, candidates, fingerprint, generation)
+		go c.confirm(key, slices.Clone(candidates), fingerprint, generation)
 	}
-	return candidates[0]
+	return c.ordered(key, candidates)[0]
 }
 
 // ChooseWithin returns the address to use for key, confirming it by connecting when
@@ -303,23 +349,27 @@ func (c *Chooser) Prefer(key string, candidates []string) string {
 // whereas attempting the best-ranked one lets the caller's own error path report
 // what really happened.
 func (c *Chooser) ChooseWithin(ctx context.Context, key string, candidates []string) string {
+	fingerprint := strings.Join(candidates, "|")
+	c.mu.Lock()
+	c.observe(key, fingerprint)
 	if len(candidates) == 0 {
+		c.mu.Unlock()
 		return ""
 	}
 	if len(candidates) == 1 || ctx.Err() != nil {
+		c.mu.Unlock()
 		return candidates[0]
 	}
-	fingerprint := strings.Join(candidates, "|")
-
-	c.mu.Lock()
-	if address, ok := c.reuse(key, candidates, fingerprint, time.Now()); ok {
+	if address, ok := c.reuse(key, candidates, fingerprint, c.now()); ok {
+		c.startReturn(key, candidates)
 		c.mu.Unlock()
 		return address
 	}
 	generation := c.generation[key]
 	c.mu.Unlock()
 
-	address, ok := first(ctx, c.dial, candidates, c.timeout)
+	ordered := c.ordered(key, candidates)
+	address, ok := first(ctx, c.dial, ordered, c.timeout)
 	return c.remember(ctx, key, candidates, fingerprint, address, ok, generation)
 }
 
@@ -331,7 +381,7 @@ func (c *Chooser) ChooseWithin(ctx context.Context, key string, candidates []str
 // replacement; releasing it here regardless would clear that replacement's
 // registration and let a third probe start alongside it.
 func (c *Chooser) confirm(key string, candidates []string, fingerprint string, generation uint64) {
-	address, ok := first(context.Background(), c.dial, candidates, c.timeout)
+	address, ok := first(context.Background(), c.dial, c.ordered(key, candidates), c.timeout)
 	c.remember(context.Background(), key, candidates, fingerprint, address, ok, generation)
 	c.mu.Lock()
 	if c.generation[key] == generation {
@@ -390,6 +440,8 @@ func (c *Chooser) remember(ctx context.Context, key string, candidates []string,
 }
 
 // Forget drops the remembered address for key so the next call confirms again.
+// Prefer ForgetAddr when the failed address is known, so a late failure does not
+// retire a newer choice and the failed address is tried last.
 // Callers invoke it when a connection to the chosen address fails: that failure is
 // the evidence which retires the answer, and without it a node whose network moved
 // would keep being dialed at an address that no longer works.
@@ -401,8 +453,150 @@ func (c *Chooser) remember(ctx context.Context, key string, candidates []string,
 // the address that probe is busy confirming.
 func (c *Chooser) Forget(key string) {
 	c.mu.Lock()
+	c.forget(key)
+	c.mu.Unlock()
+}
+
+// forget retires the current answer. The caller holds c.mu.
+func (c *Chooser) forget(key string) {
 	delete(c.cache, key)
 	delete(c.probing, key)
+	delete(c.returning, key)
+	delete(c.nextReturn, key)
 	c.generation[key]++
-	c.mu.Unlock()
+}
+
+func (c *Chooser) now() time.Time {
+	if c.clock != nil {
+		return c.clock()
+	}
+	return time.Now()
+}
+
+// ForgetAddr reports that a connection to address failed at the application
+// layer. It retires the choice only if it is still address. Either way address
+// becomes suspect for key for SuspectFor.
+func (c *Chooser) ForgetAddr(key, address string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.cache[key]; !ok || e.address == address {
+		c.forget(key)
+	} else {
+		// Keep the newer choice, but fence checks that may still be testing the
+		// reported address and let a later call reserve a fresh check.
+		c.generation[key]++
+		delete(c.probing, key)
+		delete(c.returning, key)
+	}
+	c.markSuspect(key, address)
+}
+
+func (c *Chooser) markSuspect(key, address string) {
+	if c.suspect == nil {
+		c.suspect = make(map[string]map[string]time.Time)
+	}
+	if c.suspect[key] == nil {
+		c.suspect[key] = make(map[string]time.Time)
+	}
+	c.suspect[key][address] = c.now().Add(SuspectFor)
+}
+
+// observe is called with c.mu held, even for empty or singleton lists, so they
+// also fence a check reserved against an older publication.
+func (c *Chooser) observe(key, fingerprint string) {
+	c.observeChange()
+	if c.published == nil {
+		c.published = make(map[string]string)
+	}
+	if previous, ok := c.published[key]; ok && previous != fingerprint {
+		delete(c.returning, key)
+	}
+	c.published[key] = fingerprint
+}
+
+func (c *Chooser) observeChange() {
+	if c.change == nil && c.changed != nil {
+		c.change = c.changed()
+	}
+	select {
+	case <-c.change:
+		c.change = c.changed()
+		c.networkEpoch++
+		clear(c.suspect)
+		clear(c.nextReturn)
+		clear(c.returning)
+	default:
+	}
+}
+
+// startReturn reserves a background check under c.mu. Ordinary selection keeps
+// the publisher's order; class is used only for this verified return path.
+func (c *Chooser) startReturn(key string, candidates []string) {
+	e := c.cache[key]
+	if !e.settled || c.verify == nil || c.returning[key] != nil || c.now().Before(c.nextReturn[key]) {
+		return
+	}
+	better := make([]string, 0, len(candidates))
+	for _, address := range candidates {
+		if netpick.Class(address) > netpick.Class(e.address) && !c.now().Before(c.suspect[key][address]) {
+			better = append(better, address)
+		}
+	}
+	if len(better) == 0 {
+		return
+	}
+	if c.returning == nil {
+		c.returning = make(map[string]*returnToken)
+		c.nextReturn = make(map[string]time.Time)
+	}
+	token := &returnToken{c.generation[key], e.fingerprint, c.networkEpoch}
+	c.returning[key] = token
+	go c.checkReturn(key, e.address, better, token)
+}
+
+func (c *Chooser) checkReturn(key, old string, candidates []string, token *returnToken) {
+	winner, ok := first(context.Background(), c.dial, candidates, c.timeout)
+	var err error
+	if ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = c.verify(ctx, key, winner)
+		cancel()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.observeChange()
+	if c.returning[key] != token {
+		return
+	}
+	delete(c.returning, key)
+	if c.generation[key] != token.generation || c.published[key] != token.fingerprint || c.networkEpoch != token.networkEpoch {
+		return
+	}
+	if ok && err == nil {
+		c.cache[key] = choice{fingerprint: token.fingerprint, address: winner, settled: true, at: c.now()}
+		slog.Info("reach: returned to a better address", "key", key, "old", old, "new", winner)
+	} else if ok {
+		c.markSuspect(key, winner)
+	}
+	c.nextReturn[key] = c.now().Add(ReturnCheckEvery)
+}
+
+// ordered returns a copy, keeping suspect addresses last without changing the
+// publisher's relative order within either group.
+func (c *Chooser) ordered(key string, candidates []string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	ordered := make([]string, 0, len(candidates))
+	for _, address := range candidates {
+		if !now.Before(c.suspect[key][address]) {
+			ordered = append(ordered, address)
+		}
+	}
+	for _, address := range candidates {
+		if now.Before(c.suspect[key][address]) {
+			ordered = append(ordered, address)
+		}
+	}
+	return ordered
 }

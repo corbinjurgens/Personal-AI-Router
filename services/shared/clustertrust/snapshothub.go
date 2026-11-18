@@ -19,8 +19,15 @@ type SnapshotHub[T any] struct {
 	// Clone is optional; when set, each reader receives its own copy. It runs
 	// while the hub's lock is held, so it must not call back into the hub.
 	Clone func(T) T
+	// RetainWhileRead keeps the latest value only while at least one reader
+	// is subscribed; Publish with no readers does not retain. The last cancel
+	// drops the value and starts a new epoch, so a
+	// reader joining after idle waits for a fresh publish. PublishAt rejects
+	// values collected before that idle period.
+	RetainWhileRead bool
 
 	mu      sync.Mutex
+	epoch   uint64
 	latest  T
 	has     bool
 	readers map[chan T]struct{}
@@ -38,6 +45,34 @@ func (h *SnapshotHub[T]) copy(value T) T {
 func (h *SnapshotHub[T]) Publish(value T) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.publishLocked(value)
+}
+
+// Epoch returns the current reader epoch. Capture it before collecting a
+// value that will be published with PublishAt.
+func (h *SnapshotHub[T]) Epoch() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.epoch
+}
+
+// PublishAt publishes value only if no idle period started since epoch was
+// captured. It reports whether it published.
+func (h *SnapshotHub[T]) PublishAt(epoch uint64, value T) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.RetainWhileRead && h.epoch != epoch {
+		return false
+	}
+	h.publishLocked(value)
+	return true
+}
+
+// publishLocked retains and delivers value according to the reader rule.
+func (h *SnapshotHub[T]) publishLocked(value T) {
+	if h.RetainWhileRead && len(h.readers) == 0 {
+		return
+	}
 	h.latest = h.copy(value)
 	h.has = true
 	for ch := range h.readers {
@@ -85,7 +120,14 @@ func (h *SnapshotHub[T]) Subscribe() (<-chan T, func(), bool) {
 	}
 	return ch, func() {
 		h.mu.Lock()
-		delete(h.readers, ch)
+		if _, present := h.readers[ch]; present {
+			delete(h.readers, ch)
+			if h.RetainWhileRead && len(h.readers) == 0 {
+				var zero T
+				h.latest, h.has = zero, false
+				h.epoch++
+			}
+		}
 		h.mu.Unlock()
 	}, true
 }

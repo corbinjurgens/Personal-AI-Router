@@ -53,6 +53,7 @@ type Broadcaster struct {
 	peers   *peerSet
 	mesh    *clustertrust.Mesh
 	clients *clustertrust.PeerServiceClient
+	changed func() <-chan struct{}
 	addrs   *reach.Chooser
 }
 
@@ -60,12 +61,22 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 	b := &Broadcaster{
 		peers: peers,
 		mesh:  mesh,
-		addrs: reach.NewChooser(),
 	}
+	b.addrs = reach.NewChooser(reach.WithChanged(b.peerChanges), reach.WithVerify(func(ctx context.Context, key, address string) error {
+		peers.mu.RLock()
+		peer, ok := peers.peers[key]
+		peers.mu.RUnlock()
+		if !ok {
+			return fmt.Errorf("peer %q unavailable", key)
+		}
+		b.mesh.Refresh()
+		return b.mesh.VerifyPeerAddress(ctx, peer.uuid, address)
+	}))
 	b.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
 		BaseConfigDir:     peerConfigBase(clusterDir),
 		ResolveRoute:      b.resolveRoute,
+		Changed:           b.peerChanges,
 		// Only post uses this client: nonempty, known-length event/cancel
 		// POSTs whose receiver owns deduplication. The adapter never replays.
 		ReuseConnections: true,
@@ -80,6 +91,13 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 	}
 	peers.mu.Unlock()
 	return b
+}
+
+func (b *Broadcaster) peerChanges() <-chan struct{} {
+	if b.changed == nil {
+		return nil
+	}
+	return b.changed()
 }
 
 // peerConfigBase is the configuration directory peer service clients use for
@@ -178,7 +196,7 @@ func (b *Broadcaster) deliver(ctx context.Context, t target, frame []byte) {
 		}
 		var statusErr *httpStatusError
 		if !errors.As(err, &statusErr) {
-			b.addrs.Forget(t.id)
+			b.addrs.ForgetAddr(current.id, hostport)
 		}
 		slog.Warn("broadcast attempt failed",
 			"url", url, "attempt", attempt, "max", maxBroadcastAttempts, "err", err)

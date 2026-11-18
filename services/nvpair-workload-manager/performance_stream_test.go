@@ -88,6 +88,42 @@ func performanceStreamServe(t *testing.T, f *performanceFixture, handler http.Ha
 	return stop
 }
 
+func TestPerformanceStreamReconnectsAfterChange(t *testing.T) {
+	f := newPerformanceFixture(t)
+	requests := make(chan struct{}, 4)
+	stop := performanceStreamServe(t, f, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		requests <- struct{}{}
+	}))
+	performanceAddPeer(f.manager)
+	var mu sync.Mutex
+	ch := make(chan struct{})
+	f.manager.broadcaster.changed = func() <-chan struct{} { mu.Lock(); defer mu.Unlock(); return ch }
+	previous := newPerformanceStreamRetry
+	newPerformanceStreamRetry = func() *clustertrust.PeerRetry {
+		return &clustertrust.PeerRetry{Initial: time.Hour, Cap: time.Hour, StableAfter: time.Second}
+	}
+	defer func() { newPerformanceStreamRetry = previous }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.manager.performance.keepStream(ctx, "uuid-peer") }()
+	defer func() { cancel(); stop(); performanceWaitDone(t, done) }()
+	select {
+	case <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("first performance attempt did not connect")
+	}
+	mu.Lock()
+	close(ch)
+	ch = make(chan struct{})
+	mu.Unlock()
+	select {
+	case <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("change did not reconnect performance stream")
+	}
+}
+
 // performancePeer is uuid-peer's own manager, whose stream handler serves
 // the summaries it publishes. Its clock is separate from the receiver's.
 type performancePeer struct {
@@ -362,23 +398,24 @@ func TestPerformanceStreamOlderRevisionDoesNotRefresh(t *testing.T) {
 	}
 }
 
-// consumeStream reports a healthy stream only when it delivered lines and did
-// not end on a refused or oversized frame, so refusals keep backing off.
+// Only accepted frames contribute healthy time; error endings discard it.
 func TestPerformanceStreamHealthDrivesBackoff(t *testing.T) {
 	test := func(name string, want bool, lines ...string) {
 		t.Run(name, func(t *testing.T) {
 			f := newPerformanceFixture(t)
 			performanceStreamServe(t, f, performanceLinesThen(false, lines...))
 			performanceAddPeer(f.manager)
-			if got := f.manager.performance.consumeStream(context.Background(), "uuid-peer"); got != want {
+			if got := f.manager.performance.consumeStream(context.Background(), "uuid-peer"); (got > 0) != want {
 				t.Fatalf("healthy = %v, want %v", got, want)
 			}
 		})
 	}
 	test("accepted then closed", true, performanceLine(t, performanceSummary("uuid-peer", 1), 0), "null")
-	test("keepalive only", true, "null")
+	test("keepalive only", false, "null")
 	test("refused frame", false, performanceLine(t, performanceSummary("uuid-third-party", 1), 0))
 	test("malformed frame", false, `{"summary":{},"elapsedMs":-1}`)
+	test("accepted then refused", false, performanceLine(t, performanceSummary("uuid-peer", 1), 0), "null", performanceLine(t, performanceSummary("uuid-third-party", 2), 0))
+	test("accepted then malformed", false, performanceLine(t, performanceSummary("uuid-peer", 1), 0), "null", `{"summary":{},"elapsedMs":-1}`)
 	test("over line limit", false, `{"summary":"`+strings.Repeat("x", performanceStreamMaxLine)+`","elapsedMs":0}`)
 	test("no line", false)
 }

@@ -70,9 +70,14 @@ type ReverseTarget struct {
 
 type ReverseOptions struct {
 	LocalUUID string
-	// Callbacks must be bounded and must not call back into this manager.
+	// Validate and ResolveService must be bounded and must not call back into
+	// this manager.
 	Validate       func(ReversePeer) bool
 	ResolveService func(context.Context, ReversePeer, noderec.ServiceKey) (ReverseTarget, error)
+	// OnSessionEnd runs once per registered session as it closes, before its
+	// map entry is removed and without the manager mutex held. Has still sees
+	// a registered session during this callback. replaced means a duplicate won.
+	OnSessionEnd func(peer ReversePeer, uptime time.Duration, replaced bool)
 	// Stream limits count application streams in both directions. Each session
 	// also owns one control stream, bounded process-wide by MaxSessions.
 	PerSessionStreams int           // default 16
@@ -260,7 +265,7 @@ func (m *ReverseManager) Register(peer ReversePeer, conn net.Conn, initiator, id
 	cfg.StreamOpenTimeout = m.opts.SetupTimeout
 	cfg.ConnectionWriteTimeout = m.opts.SetupTimeout
 	cfg.LogOutput = yamuxLog{m.logger(), peer.UUID}
-	conn = newReverseMuxConn(conn, m.opts.SetupTimeout)
+	conn = newReverseMuxConn(DefaultPeerStats.CountConn(conn, peer.UUID, "reverse-tunnel"), m.opts.SetupTimeout)
 	var session *yamux.Session
 	var err error
 	if initiator == m.opts.LocalUUID {
@@ -282,6 +287,7 @@ func (m *ReverseManager) Register(peer ReversePeer, conn net.Conn, initiator, id
 		old.end("replaced by duplicate session")
 	}
 	m.sessions[peer.UUID] = s
+	DefaultPeerStats.SessionUp(peer.UUID)
 	m.wg.Add(1)
 	m.mu.Unlock()
 	if old != nil {
@@ -548,7 +554,16 @@ func (m *ReverseManager) Has(peer ReversePeer) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := m.sessions[peer.UUID]
-	if s == nil || s.peer != peer || !m.current(s) {
+	// A registered session remains present through its end callback so
+	// a supervisor cannot redial before that callback records the retry delay.
+	// Open still uses current, which refuses a closed transport immediately.
+	if s == nil || s.peer != peer || m.closed || !m.opts.Validate(peer) {
+		return false
+	}
+	if m.opts.OnSessionEnd != nil {
+		return true
+	}
+	if s.session.IsClosed() {
 		return false
 	}
 	select {
@@ -575,6 +590,35 @@ func (m *ReverseManager) Revalidate() {
 		s.cancel()
 		s.session.Close()
 	}
+}
+
+// Probe pings every live session concurrently and closes each one whose
+// ping fails (yamux bounds a ping by ConnectionWriteTimeout to send and
+// again to wait for the reply). It returns the number closed. Sessions
+// that answer are left untouched.
+func (m *ReverseManager) Probe() int {
+	m.mu.Lock()
+	all := make([]*reverseSession, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		all = append(all, s)
+	}
+	m.mu.Unlock()
+	var closed atomic.Int64
+	var wg sync.WaitGroup
+	for _, s := range all {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.session.Ping(); err != nil {
+				s.end("probe failed")
+				s.cancel()
+				s.session.Close()
+				closed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	return int(closed.Load())
 }
 
 func (m *ReverseManager) Revoke(uuid string) {
@@ -636,6 +680,10 @@ func (m *ReverseManager) accept(s *reverseSession) {
 		s.end("session ended")
 		s.cancel()
 		s.session.Close()
+		DefaultPeerStats.SessionDown(s.peer.UUID, sessionCloseLabel(s.reason()))
+		if m.opts.OnSessionEnd != nil {
+			m.opts.OnSessionEnd(s.peer, time.Since(s.started), s.reason() == "replaced by duplicate session")
+		}
 		m.mu.Lock()
 		if m.sessions[s.peer.UUID] == s {
 			delete(m.sessions, s.peer.UUID)
@@ -687,6 +735,29 @@ func (m *ReverseManager) accept(s *reverseSession) {
 			defer func() { s.mu.Lock(); delete(s.forwards, id); s.mu.Unlock() }()
 			m.serve(ctx, s, stream)
 		}()
+	}
+}
+
+func sessionCloseLabel(reason string) string {
+	switch {
+	case reason == "session ended" || strings.HasPrefix(reason, "session ended: "):
+		return "ended"
+	case reason == "replaced by duplicate session":
+		return "replaced"
+	case reason == "peer no longer admitted":
+		return "not-admitted"
+	case reason == "revoked":
+		return "revoked"
+	case reason == "reverse manager closed":
+		return "manager-closed"
+	case strings.HasPrefix(reason, "control stream"):
+		return "control-failed"
+	case reason == "peer exceeded the per-session stream limit" || strings.HasPrefix(reason, "stream rejected"):
+		return "protocol"
+	case reason == "probe failed":
+		return "probe-failed"
+	default:
+		return "other"
 	}
 }
 

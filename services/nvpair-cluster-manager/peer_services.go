@@ -44,11 +44,6 @@ const peerStateResponseHeaderTimeout = 8 * time.Second
 // so a stalled address cannot starve the next. A var so tests can shorten it.
 var peerStateConnectTimeout = 8 * time.Second
 
-// peerStateMinHealthy is how long a stream that delivered a frame must have
-// run, counted from the start of its connect, for its end to reset the peer's
-// reconnect backoff.
-const peerStateMinHealthy = 5 * time.Second
-
 // peerStateEvaluateEvery re-evaluates the member set without a signal;
 // peerStateDueEvery checks reconnect backoff from in-memory state only.
 const (
@@ -205,7 +200,13 @@ type peerStateResult struct {
 	addrs       []string
 	gotFrame    bool
 	forbidden   bool
-	open        time.Duration
+	outcome     clustertrust.StreamOutcome
+	changed     <-chan struct{}
+}
+
+type peerStateRead struct {
+	gotFrame bool
+	outcome  clustertrust.StreamOutcome
 }
 
 // peerReachableSet holds members just shown reachable, until peerStateLoop
@@ -217,9 +218,9 @@ type peerReachableSet struct {
 
 // notePeerReachable records evidence that uuid is reachable again (a reverse
 // session, an accepted inbound peer-state stream, or an accepted roster
-// exchange). peerStateLoop then resets that member's reconnect backoff and
-// redials it at once, so the 30 s cap applies only while a member stays
-// unreachable.
+// exchange). peerStateLoop then expedites that member's reconnect backoff and
+// redials it at once without erasing that member's failure history. Only an
+// accepted stream is evidence; refused requests must not wake each other.
 func (m *Manager) notePeerReachable(uuid string) {
 	m.peerReachable.mu.Lock()
 	if m.peerReachable.uuids == nil {
@@ -246,7 +247,7 @@ func (m *Manager) takeReachablePeers() []string {
 
 // newPeerStateBackoff builds peerStateLoop's reconnect backoff. A var so tests
 // can start from a long delay.
-var newPeerStateBackoff = newPeerBackoff
+var newPeerStateBackoff = clustertrust.NewPeerBackoff
 
 // signalPeerStateMembers asks peerStateLoop to re-evaluate the member set now.
 func (m *Manager) signalPeerStateMembers() {
@@ -269,7 +270,6 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 	m.serviceRefresh.source = hex.EncodeToString(source[:])
 	m.serviceRefresh.mu.Unlock()
 
-	backoff := newPeerStateBackoff()
 	active := make(map[string]peerStateStream)
 	members := make(map[string]string) // uuid -> incarnation at the last evaluation
 	// streamed records, per member, the incarnation under which its stream
@@ -294,26 +294,26 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 				continue
 			}
 			addrs := m.resolvePeerAddrs(*member)
-			if !backoff.due(uuid, addrs, now) {
+			if !m.peerStateBackoff.Due(uuid, addrs, now) {
 				continue
 			}
 			streamCtx, cancel := context.WithCancel(ctx)
+			changed := m.peerChanges()
 			active[uuid] = peerStateStream{cancel: cancel, incarnation: incarnation}
 			work.Add(1)
 			go func() {
 				defer work.Done()
-				opened := time.Now()
-				gotFrame, err := m.runPeerStateStream(streamCtx, uuid, incarnation)
+				read, err := m.runPeerStateStream(streamCtx, uuid, incarnation)
 				cancel()
-				result := peerStateResult{uuid: uuid, incarnation: incarnation, addrs: addrs, gotFrame: gotFrame,
-					forbidden: errors.Is(err, errPeerStateForbidden), open: time.Since(opened)}
+				result := peerStateResult{uuid: uuid, incarnation: incarnation, addrs: addrs, gotFrame: read.gotFrame,
+					forbidden: errors.Is(err, errPeerStateForbidden), outcome: read.outcome, changed: changed}
 				select {
 				case done <- result:
 				case <-ctx.Done():
 				}
 			}()
 		}
-		backoff.retain(keep)
+		m.peerStateBackoff.Retain(keep)
 	}
 	evaluate := func() {
 		m.mesh.Refresh()
@@ -369,10 +369,12 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 			if stream.stopped {
 				continue
 			}
-			if result.gotFrame && result.open >= peerStateMinHealthy {
-				backoff.reset(result.uuid)
-			} else {
-				backoff.failed(result.uuid, result.addrs, time.Now())
+			select {
+			case <-result.changed:
+				m.peerStateBackoff.Reset(result.uuid)
+				start()
+			default:
+				m.peerStateBackoff.Ended(result.uuid, result.addrs, result.outcome.Healthy, time.Now())
 			}
 		case <-evaluateTicker.C:
 			evaluate()
@@ -382,7 +384,7 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 			start()
 		case <-m.peerReachableWake:
 			for _, uuid := range m.takeReachablePeers() {
-				backoff.reset(uuid)
+				m.peerStateBackoff.Expedite(uuid)
 			}
 			start()
 		}
@@ -401,20 +403,20 @@ var errPeerStateForbidden = errors.New("peer-state stream refused")
 // stream delivered at least one frame. The request context carries no
 // deadline; the adapter's response-header timeout and the idle watchdog bound
 // the stream instead.
-func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation string) (gotFrame bool, err error) {
+func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation string) (read peerStateRead, err error) {
 	peer, ok := m.reversePeer(uuid)
 	if !ok {
-		return false, errors.New("no current member")
+		return read, errors.New("no current member")
 	}
 	member, ok := m.memberByUUID(uuid)
 	if !ok {
-		return false, errors.New("member unavailable")
+		return read, errors.New("member unavailable")
 	}
 	if current, ok := m.peerServiceIncarnation(uuid); !ok || current != incarnation {
-		return false, errors.New("admission changed")
+		return read, errors.New("admission changed")
 	}
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return read, err
 	}
 	addresses := m.resolvePeerAddrs(*member)
 	choose, cancelChoose := context.WithTimeout(ctx, 8*time.Second)
@@ -422,20 +424,20 @@ func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation stri
 	cancelChoose()
 	for _, address := range addresses {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return read, err
 		}
 		if !m.selectPeerServiceAddress(uuid, address) {
 			continue
 		}
 		client, err := m.peerServiceClient(uuid, m.peerStateStreams)
 		if err != nil {
-			return false, err
+			return read, err
 		}
 		streamCtx, cancel := context.WithCancel(ctx)
 		req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, "https://"+address+peerStatePath, nil)
 		if err != nil {
 			cancel()
-			return false, err
+			return read, err
 		}
 		// A cancel timer rather than a context deadline: DialReverse copies a
 		// deadline onto the yamux stream, which would end an opened stream.
@@ -449,9 +451,9 @@ func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation stri
 		if err != nil {
 			cancel()
 			if parentErr := ctx.Err(); parentErr != nil {
-				return false, parentErr
+				return read, parentErr
 			}
-			m.peerAddrs.Forget(uuid)
+			m.peerAddrs.ForgetAddr(uuid, address)
 			continue
 		}
 		switch response.StatusCode {
@@ -459,33 +461,35 @@ func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation stri
 		case http.StatusForbidden:
 			response.Body.Close()
 			cancel()
-			return false, errPeerStateForbidden
+			return read, errPeerStateForbidden
 		case http.StatusServiceUnavailable:
 			response.Body.Close()
 			cancel()
-			return false, errors.New("peer-state not ready")
+			return read, errors.New("peer-state not ready")
 		default:
 			response.Body.Close()
 			cancel()
-			m.peerAddrs.Forget(uuid)
+			m.peerAddrs.ForgetAddr(uuid, address)
 			continue
 		}
-		gotFrame, err := m.readPeerStateStream(streamCtx, cancel, response.Body, uuid, incarnation, peer)
+		read, err := m.readPeerStateStream(streamCtx, cancel, response.Body, uuid, incarnation, peer)
 		response.Body.Close()
-		return gotFrame, err
+		return read, err
 	}
-	return false, errors.New("peer state unavailable")
+	return read, errors.New("peer state unavailable")
 }
 
 // readPeerStateStream commits every frame's descriptor, re-emits the
 // peer-services claim on every line (keepalives included, once a frame has
 // arrived), and requests a roster reconcile on the first frame and whenever the
 // roster hash changes.
-func (m *Manager) readPeerStateStream(ctx context.Context, cancel context.CancelFunc, body io.Reader, uuid, incarnation string, peer clustertrust.ReversePeer) (bool, error) {
+func (m *Manager) readPeerStateStream(ctx context.Context, cancel context.CancelFunc, body io.Reader, uuid, incarnation string, peer clustertrust.ReversePeer) (peerStateRead, error) {
 	var descriptor noderec.PeerServicesDescriptor
 	var rosterHash string
 	gotFrame := false
-	err := clustertrust.ReadSnapshotStream(ctx, cancel, body, clustertrust.SnapshotStreamClient[noderec.PeerStateFrame]{
+	outcome, err := clustertrust.ReadSnapshotStream(ctx, cancel, body, clustertrust.SnapshotStreamClient[noderec.PeerStateFrame]{
+		Kind: "peer-state", Peer: uuid,
+		Changed: m.changed,
 		Idle:    peerStateIdle,
 		MaxLine: noderec.PeerStateMaxLine,
 		Current: func() bool {
@@ -520,7 +524,7 @@ func (m *Manager) readPeerStateStream(ctx context.Context, cancel context.Cancel
 			}
 		},
 	})
-	return gotFrame, err
+	return peerStateRead{gotFrame: gotFrame, outcome: outcome}, err
 }
 
 // emitPeerServicesClaim publishes descriptor as a fresh cluster:peer-services

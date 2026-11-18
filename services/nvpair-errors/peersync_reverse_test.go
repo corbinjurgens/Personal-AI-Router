@@ -88,9 +88,13 @@ func (w *streamStatusWriter) Unwrap() http.ResponseWriter { return w.ResponseWri
 // setErrorsStreamRetry sets the first reconnect delay for one test.
 func setErrorsStreamRetry(t *testing.T, d time.Duration) {
 	t.Helper()
-	previous := errorsStreamRetryMin
-	errorsStreamRetryMin = d
-	t.Cleanup(func() { errorsStreamRetryMin = previous })
+	previous := newErrorsStreamRetry
+	newErrorsStreamRetry = func() *clustertrust.PeerRetry {
+		r := clustertrust.NewStreamRetry()
+		r.Initial = d
+		return r
+	}
+	t.Cleanup(func() { newErrorsStreamRetry = previous })
 }
 
 func newErrorSyncFixture(t *testing.T) *errorSyncFixture {

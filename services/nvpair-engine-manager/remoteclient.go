@@ -209,7 +209,7 @@ func (m *Manager) remoteClient(ctx context.Context, peer ecPeer) (*remoteClient,
 		controlHTTP:      control,
 		controlReadyHTTP: ready,
 		base:             "https://" + hostport,
-		forget:           func() { m.addrs.Forget(peer.nodeID) },
+		forget:           func() { m.addrs.ForgetAddr(peer.nodeID, hostport) },
 		loadBudget:       m.exec.loadResponseBudget,
 	}, nil
 }

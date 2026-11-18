@@ -104,6 +104,7 @@ func (d *daemon) newPeerServiceAdapter(route peerRouteCapture, timeout time.Dura
 		BaseConfigDir:     d.baseDir, ResolveRoute: route.resolve,
 		DirectTimeout: nodeInfoDialTimeout,
 		DialContext:   d.peerDialContext,
+		Changed:       d.peerChanged(),
 	})
 }
 

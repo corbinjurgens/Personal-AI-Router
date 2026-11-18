@@ -20,6 +20,97 @@ func pending[T any](t *testing.T, ch <-chan T) (T, bool) {
 	}
 }
 
+func TestSnapshotHubRetainWhileReadDropsSeedWhenIdle(t *testing.T) {
+	hub := SnapshotHub[int]{RetainWhileRead: true}
+	_, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	hub.Publish(1)
+	cancel()
+	epoch := hub.Epoch()
+	cancel()
+	if hub.Epoch() != epoch {
+		t.Fatal("repeated cancel started another epoch")
+	}
+	ch, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("resubscribe refused")
+	}
+	defer cancel()
+	if value, got := pending(t, ch); got {
+		t.Fatalf("idle seed = %d, want none", value)
+	}
+	hub.Publish(2)
+	if value, got := pending(t, ch); !got || value != 2 {
+		t.Fatalf("fresh value = (%d, %v), want (2, true)", value, got)
+	}
+}
+
+func TestSnapshotHubRetainWhileReadSkipsPublishWithoutReaders(t *testing.T) {
+	hub := SnapshotHub[int]{RetainWhileRead: true}
+	hub.Publish(1)
+	if value, has := hub.Latest(); has {
+		t.Fatalf("retained %d without readers", value)
+	}
+	ch, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	defer cancel()
+	if value, got := pending(t, ch); got {
+		t.Fatalf("seed = %d, want none", value)
+	}
+}
+
+func TestSnapshotHubPublishAtRejectsEarlierEpoch(t *testing.T) {
+	hub := SnapshotHub[int]{RetainWhileRead: true}
+	_, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	epoch := hub.Epoch()
+	cancel()
+	ch, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("resubscribe refused")
+	}
+	defer cancel()
+	if hub.PublishAt(epoch, 1) {
+		t.Fatal("published across an idle period")
+	}
+	if value, got := pending(t, ch); got {
+		t.Fatalf("old epoch delivered %d", value)
+	}
+	if !hub.PublishAt(hub.Epoch(), 2) {
+		t.Fatal("current epoch refused")
+	}
+	if value, got := pending(t, ch); !got || value != 2 {
+		t.Fatalf("current epoch = (%d, %v), want (2, true)", value, got)
+	}
+}
+
+func TestSnapshotHubDefaultRetainsSeedAfterIdle(t *testing.T) {
+	var hub SnapshotHub[int]
+	_, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	hub.Publish(1)
+	cancel()
+	if !hub.PublishAt(hub.Epoch()+1, 2) {
+		t.Fatal("default hub rejected PublishAt")
+	}
+	ch, cancel, ok := hub.Subscribe()
+	if !ok {
+		t.Fatal("resubscribe refused")
+	}
+	defer cancel()
+	if value, got := pending(t, ch); !got || value != 2 {
+		t.Fatalf("seed = (%d, %v), want (2, true)", value, got)
+	}
+}
+
 func TestSnapshotHub(t *testing.T) {
 	t.Run("subscribe before publish receives nothing until the first publish", func(t *testing.T) {
 		var hub SnapshotHub[int]

@@ -34,6 +34,85 @@ import (
 	"nvpair-shared/noderec"
 )
 
+func TestPeerStreamRetryLadderAndStableReset(t *testing.T) {
+	m := &Manager{peers: newPeerDirectory(), peerStreamRetry: func() *clustertrust.PeerRetry {
+		return &clustertrust.PeerRetry{Initial: 10 * time.Millisecond, Cap: time.Second, StableAfter: time.Second, Jitter: func() float64 { return 1 }}
+	}}
+	m.peers.peers["peer"] = ecPeer{nodeID: "peer"}
+	var starts []time.Time
+	ended := 0
+	m.keepPeerStream(context.Background(), "peer", func(context.Context, ecPeer) time.Duration {
+		starts = append(starts, time.Now())
+		if len(starts) == 3 {
+			return time.Second
+		}
+		return 0
+	}, func() {
+		ended++
+		if ended == 4 {
+			m.peers.mu.Lock()
+			delete(m.peers.peers, "peer")
+			m.peers.mu.Unlock()
+		}
+	})
+	if ended != 4 {
+		t.Fatalf("ended = %d, want 4", ended)
+	}
+	for i, delay := range []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 10 * time.Millisecond} {
+		if got := starts[i+1].Sub(starts[i]); got < delay || got > delay+100*time.Millisecond {
+			t.Fatalf("retry wait = %v, want about %v", got, delay)
+		}
+	}
+}
+
+func TestPeerSettingsStreamReconnectsAfterChange(t *testing.T) {
+	f := newRemoteReverseFixture(t, func(*clustertrust.Mesh) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	})
+	var mu sync.Mutex
+	ch := make(chan struct{})
+	f.m.changed = func() <-chan struct{} { mu.Lock(); defer mu.Unlock(); return ch }
+	f.m.peerStreamRetry = func() *clustertrust.PeerRetry {
+		return &clustertrust.PeerRetry{Initial: time.Hour, Cap: time.Hour, StableAfter: time.Second}
+	}
+	ended := make(chan struct{}, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.m.keepPeerStream(ctx, f.node.HostUUID, f.m.consumeSettingsStream, func() { ended <- struct{}{} })
+	}()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("first settings attempt did not end")
+	}
+	mu.Lock()
+	close(ch)
+	ch = make(chan struct{})
+	mu.Unlock()
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("change did not reconnect manager settings stream")
+	}
+}
+
+func TestPeerStreamRefusalReason(t *testing.T) {
+	f := newRemoteReverseFixture(t, func(*clustertrust.Mesh) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	})
+	peer, ok := f.m.peers.lookup(f.node.HostUUID)
+	if !ok {
+		t.Fatal("fixture peer missing")
+	}
+	response, _, reason := f.m.openPeerStream(remoteFixtureContext(t), peer, settingsPath+"events")
+	if response != nil || reason != "refused 503" {
+		t.Fatalf("response/reason = %v / %q", response, reason)
+	}
+}
+
 func TestSettingsRemoteStatedMemoryTargetStore(t *testing.T) {
 	for _, transport := range []string{"direct", "reverse"} {
 		t.Run(transport, func(t *testing.T) {

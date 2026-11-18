@@ -52,9 +52,17 @@ func (p *Proxy) peerServiceClient() *clustertrust.PeerServiceClient {
 		p.peerServices = clustertrust.NewPeerServiceClient(p.mesh, clustertrust.PeerServiceClientOptions{
 			PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: proxyResponseTimeout},
 			BaseConfigDir:     p.baseConfigDir, ResolveRoute: p.resolvePeerServiceRoute,
+			Changed: p.peerChanges,
 		})
 	}
 	return p.peerServices
+}
+
+func (p *Proxy) peerChanges() <-chan struct{} {
+	if p.mon == nil {
+		return nil
+	}
+	return p.mon.Changed()
 }
 
 func (p *Proxy) resolvePeerServiceRoute(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {

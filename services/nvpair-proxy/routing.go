@@ -2162,7 +2162,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				// A hybrid attempt that found every peer slot occupied says
 				// nothing about the address, which stays confirmed.
 				if !stderrors.Is(err, clustertrust.ErrPeerSlotOccupied) {
-					candFacade.targets.Forget(cand.id)
+					candFacade.targets.ForgetAddr(cand.id, target.Host)
 				}
 				if !last && !bodyCleanupPending {
 					// Transport/dial error with candidates left: fail over.

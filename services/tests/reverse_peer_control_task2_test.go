@@ -504,9 +504,16 @@ func TestReversePeerControlTask2(t *testing.T) {
 	ec := f.b.observers[noderec.ServiceEngineControl]
 	outer := f.a.observers[noderec.ServiceCluster]
 	snapshot := settings.Snapshot{NodeID: f.b.uuid, Engine: "llamacpp", Revision: 7, AppliedRevision: 7, Sequence: 1, Epoch: "task2-epoch", Settings: settings.Config{ServerPort: 45678}, Editable: true, Phase: "applied"}
+	// The fixture repeatedly interrupts sessions before the stable reset.
+	// Allow a jittered capped retry plus connect and supervisor scheduling.
+	recoveryWait := clustertrust.PeerRetryCap*12/10 + 15*time.Second
 	assertEngines := func(t *testing.T, source *task1Process, target string) {
 		t.Helper()
-		response := source.callEventually(t, "engine:remote-get-installed", map[string]string{"node": target})
+		var response jsonrpc.Message
+		task1Eventually(t, "engine-status stream recovers", recoveryWait, func() bool {
+			response = source.callResponse(t, "engine:remote-get-installed", map[string]string{"node": target})
+			return response.Error == nil
+		})
 		var result struct {
 			Engines []struct {
 				Engine  string `json:"engine"`
@@ -552,7 +559,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 		f.a.cm = startTask1Process(tRoot, f.a.base, clusterMgrBin, "--config-dir", f.a.base, "--port", strconv.Itoa(f.a.ports[noderec.ServiceCluster]))
 		f.a.cm.call(t, "cluster:get-node-id", nil)
 		f.a.cm.call(t, "cluster:set-local-services", map[string]any{"generation": 1, "services": []noderec.RegisterParams{{Service: noderec.ServiceCluster, Port: outer.port}, {Service: noderec.ServiceEngineControl, Port: f.a.observers[noderec.ServiceEngineControl].port}}})
-		task1Eventually(t, "outer reconnect after gateway restart", 15*time.Second, func() bool { return outer.established(f.b.uuid) >= 2 })
+		task1Eventually(t, "outer reconnect after gateway restart", recoveryWait, func() bool { return outer.established(f.b.uuid) >= 2 })
 		assertEngines(t, a, f.b.uuid)
 	})
 	t.Run("direct opposite direction remains usable without reverse", func(t *testing.T) {
@@ -562,7 +569,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 			t.Fatal("direct opposite-direction control has no engine-status stream")
 		}
 		outer.interrupt(f.b.uuid, false)
-		task1Eventually(t, "outer session restored", 15*time.Second, func() bool { return outer.established(f.b.uuid) >= 3 })
+		task1Eventually(t, "outer session restored", recoveryWait, func() bool { return outer.established(f.b.uuid) >= 3 })
 	})
 	t.Run("settings policy and live events retain authenticated caller", func(t *testing.T) {
 		response := task2Relay(t, a, b, "engine:remote-get-settings", settings.Request{NodeID: f.b.uuid, Engine: "llamacpp", ExpectedRevision: 7}, "engine:settings-request", "engine:settings-reply", f.a.uuid, snapshot)
@@ -639,7 +646,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 		}
 	})
 	t.Run("lost mutation reply dispatches once and never replays", func(t *testing.T) {
-		task1Eventually(t, "outer ready for mutation", 15*time.Second, func() bool {
+		task1Eventually(t, "outer ready for mutation", recoveryWait, func() bool {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			conn, err := clustertrust.DialReverse(ctx, f.a.base, f.b.uuid, noderec.ServiceEngineControl)
@@ -686,12 +693,12 @@ func TestReversePeerControlTask2(t *testing.T) {
 	t.Run("new session recovers reads events and scanner without mutation replay", func(t *testing.T) {
 		generation := outer.established(f.b.uuid)
 		outer.interrupt(f.b.uuid, false)
-		task1Eventually(t, "fresh outer session", 15*time.Second, func() bool { return outer.established(f.b.uuid) > generation })
+		task1Eventually(t, "fresh outer session", recoveryWait, func() bool { return outer.established(f.b.uuid) > generation })
 		assertEngines(t, a, f.b.uuid)
 		snapshot.Sequence = 4
 		b.send(t, "engine:settings-projection", []settings.Snapshot{snapshot}, false)
-		task1Eventually(t, "recovered settings event", 15*time.Second, func() bool { return task2Event(t, a, f.b.uuid, 4) })
-		task1Eventually(t, "scanner reports unloaded fixture inventory", 35*time.Second, func() bool {
+		task1Eventually(t, "recovered settings event", recoveryWait, func() bool { return task2Event(t, a, f.b.uuid, 4) })
+		task1Eventually(t, "scanner reports unloaded fixture inventory", recoveryWait, func() bool {
 			node := f.restricted(t)
 			loaded, known := node.LoadedByEngine["llamacpp"]
 			return node.ClusterUUID == f.b.uuid && node.Trusted && reflect.DeepEqual(node.Models, []string{"task2-model"}) && known && len(loaded) == 0

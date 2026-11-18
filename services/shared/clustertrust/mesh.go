@@ -5,12 +5,14 @@ package clustertrust
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -597,4 +599,20 @@ func (m *Mesh) ClientTLSConfigAny() (*tls.Config, bool) {
 			return nil
 		},
 	}, true
+}
+
+// VerifyPeerAddress dials address and completes the pinned mTLS handshake for
+// peerUUID, then closes the connection. It returns an error when the peer has no
+// pin, the dial fails or the handshake fails.
+func (m *Mesh) VerifyPeerAddress(ctx context.Context, peerUUID, address string) error {
+	config, ok := m.ClientTLSConfig(peerUUID)
+	if !ok {
+		return fmt.Errorf("no TLS pin for peer %q", peerUUID)
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return tls.Client(conn, config).HandshakeContext(ctx)
 }

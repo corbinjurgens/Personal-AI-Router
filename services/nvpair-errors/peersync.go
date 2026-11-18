@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -46,12 +45,9 @@ const (
 	// cancel timer, not a context deadline: a reverse dial copies a deadline
 	// onto the yamux stream, which would end the open stream.
 	errorsStreamConnectTimeout = 10 * time.Second
-	errorsStreamRetryMax       = 30 * time.Second
 )
 
-// errorsStreamRetryMin is the first reconnect delay; it doubles up to
-// errorsStreamRetryMax and resets after a stream that delivered a frame.
-var errorsStreamRetryMin = time.Second
+var newErrorsStreamRetry = clustertrust.NewStreamRetry
 
 // peerTarget is a discovered peer's stream destination: every host:port it
 // published, in its own ranked order, plus its cluster principal (uuid), which
@@ -84,6 +80,7 @@ type PeerSync struct {
 	// clients opens streams directly or over a reverse session. It has no total
 	// timeout, because a stream stays open.
 	clients    *clustertrust.PeerServiceClient
+	changed    func() <-chan struct{}
 	clusterDir string
 
 	// addrs remembers which of a peer's published addresses answered, so a
@@ -111,11 +108,20 @@ func NewPeerSync(mgr *Manager, mesh *clustertrust.Mesh, clusterDir string) *Peer
 		localNodeID: mgr.LocalNodeID(),
 		mesh:        mesh,
 		clusterDir:  clusterDir,
-		addrs:       reach.NewChooser(),
 		discovered:  make(map[string]RawNode),
 		peers:       make(map[string]peerTarget),
 		resubscribe: make(chan struct{}, 1),
 	}
+	ps.addrs = reach.NewChooser(reach.WithChanged(ps.peerChanges), reach.WithVerify(func(ctx context.Context, key, address string) error {
+		ps.mu.RLock()
+		peer, ok := ps.peers[key]
+		ps.mu.RUnlock()
+		if !ok {
+			return fmt.Errorf("peer %q unavailable", key)
+		}
+		ps.mesh.Refresh()
+		return ps.mesh.VerifyPeerAddress(ctx, peer.uuid, address)
+	}))
 	baseDir := ""
 	if clusterDir != "" {
 		baseDir = filepath.Dir(filepath.Clean(clusterDir))
@@ -123,8 +129,16 @@ func NewPeerSync(mgr *Manager, mesh *clustertrust.Mesh, clusterDir string) *Peer
 	ps.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		BaseConfigDir: baseDir,
 		ResolveRoute:  ps.resolveRoute,
+		Changed:       ps.peerChanges,
 	})
 	return ps
+}
+
+func (ps *PeerSync) peerChanges() <-chan struct{} {
+	if ps.changed == nil {
+		return nil
+	}
+	return ps.changed()
 }
 
 // resolveRoute uses shared admission authority at every adapter authorization
@@ -299,47 +313,33 @@ func (ps *PeerSync) stopStreams() {
 	ps.clients.CloseIdle()
 }
 
-// runStream keeps one stream to nodeID open until ctx ends, reconnecting after
-// a delay that starts at errorsStreamRetryMin, doubles up to
-// errorsStreamRetryMax with ±20 % jitter, and resets after a stream that
-// delivered a frame.
+// runStream keeps one stream open using the shared peer reconnect schedule.
 func (ps *PeerSync) runStream(ctx context.Context, nodeID string, stream uint64) {
-	delay := errorsStreamRetryMin
-	for {
-		if ps.streamOnce(ctx, nodeID, stream) {
-			delay = errorsStreamRetryMin
-		}
-		retry := time.NewTimer(time.Duration(float64(delay) * (0.8 + 0.4*rand.Float64())))
-		select {
-		case <-ctx.Done():
-			retry.Stop()
-			return
-		case <-retry.C:
-		}
-		delay = min(2*delay, errorsStreamRetryMax)
-	}
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newErrorsStreamRetry(), Changed: ps.changed}, func(ctx context.Context) (time.Duration, bool) {
+		return ps.streamOnce(ctx, nodeID, stream), true
+	})
 }
 
 // streamOnce opens one stream to nodeID and applies its frames until it ends.
-// It reports whether the stream delivered a frame.
-func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64) bool {
+// It reports the accepted stream's healthy duration.
+func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64) time.Duration {
 	ps.mu.RLock()
 	target, ok := ps.peers[nodeID]
 	ps.mu.RUnlock()
 	if !ok || target.stream != stream {
-		return false
+		return 0
 	}
 	// Refuse an unadmitted peer before probing its addresses.
 	ps.mesh.Refresh()
 	if _, admitted := ps.mesh.PeerServiceIncarnation(target.uuid); !admitted {
 		slog.Debug("errors stream: peer not admitted", "nodeId", nodeID)
-		return false
+		return 0
 	}
 	// Confirm the address before spending a connect on it.
 	hostport := ps.addrs.ChooseWithin(ctx, nodeID, target.candidates)
 	if hostport == "" {
 		slog.Warn("errors stream: peer has no reachable address", "nodeId", nodeID)
-		return false
+		return 0
 	}
 	// Publish the selected endpoint only while this stream still owns the
 	// target. A removed or replaced target cannot regain a route.
@@ -347,7 +347,7 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 	current, ok := ps.peers[nodeID]
 	if !ok || current.stream != stream {
 		ps.mu.Unlock()
-		return false
+		return 0
 	}
 	if current.address != hostport {
 		ps.generation++
@@ -358,7 +358,7 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 	route, ok := ps.resolveRoute(target.uuid, noderec.ServiceErrors)
 	if !ok {
 		slog.Debug("errors stream: peer route not admitted", "nodeId", nodeID)
-		return false
+		return 0
 	}
 
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -366,7 +366,7 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 	url := "https://" + hostport + errorsStreamPath
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return false
+		return 0
 	}
 	watchdog := time.AfterFunc(errorsStreamConnectTimeout, cancel)
 	resp, err := ps.clients.Client(target.uuid, noderec.ServiceErrors).Do(req)
@@ -379,19 +379,20 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 			// A transport failure retires the address, so the next attempt
 			// confirms the peer's list again. A response, even a refusal, means
 			// the address is fine.
-			ps.addrs.Forget(nodeID)
+			ps.addrs.ForgetAddr(nodeID, hostport)
 			slog.Warn("errors stream connect failed", "nodeId", nodeID, "url", url, "err", err)
 		}
-		return false
+		return 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		slog.Warn("errors stream refused", "nodeId", nodeID, "url", url, "status", resp.StatusCode)
-		return false
+		return 0
 	}
 	slog.Debug("errors stream connected", "nodeId", nodeID, "url", url)
-	delivered := false
-	err = clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[errors.SyncEnvelope]{
+	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[errors.SyncEnvelope]{
+		Kind: "errors", Peer: target.uuid,
+		Changed: ps.changed,
 		Idle:    errorsStreamIdle,
 		MaxLine: jsonrpc.DefaultFrameBytes,
 		// The route carries admission, both certificates and the endpoint, so
@@ -418,12 +419,11 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 				return context.Canceled
 			}
 			ps.mgr.ReconcilePeer(env.NodeID, env.Errors)
-			delivered = true
 			return nil
 		},
 	})
 	slog.Debug("errors stream ended", "nodeId", nodeID, "err", err)
-	return delivered
+	return outcome.Healthy
 }
 
 // peerHostPorts builds every "host:port" worth subscribing to for a discovered

@@ -43,19 +43,19 @@ func (d *daemon) runModelsStream(ctx context.Context, hostUUID string, id uint64
 	var emPort int
 	var generation uint64
 	var guarded bool
-	runPeerStream(ctx, func(ctx context.Context) bool {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPeerStreamRetry(), Changed: d.peerChanged()}, func(ctx context.Context) (time.Duration, bool) {
 		generation = d.dir.routeGeneration(hostUUID)
 		node, found := d.dir.get(hostUUID)
 		em, advertised := node.Services[noderec.ServiceEngineManager]
 		guardIP, emPort, guarded = node.IP, em.Port, found && advertised
-		return d.streamPeerOnce(hostUUID, noderec.ServiceEngineManager, func(client *http.Client, current func() bool, node noderec.DirectoryNode, host string, port int) (bool, bool) {
-			return d.readModelsStream(ctx, client, current, hostUUID, node.IP, host, port, id)
+		up := d.streamPeerOnce(hostUUID, noderec.ServiceEngineManager, func(client *http.Client, current func() bool, node noderec.DirectoryNode, host string, port int) (time.Duration, bool) {
+			return d.readModelsStream(ctx, client, current, hostUUID, node.ClusterUUID, node.IP, host, port, id)
 		})
-	}, func() {
 		d.dropModelsLive(hostUUID, id)
 		if guarded && ctx.Err() == nil {
 			d.markModelsUnavailable(hostUUID, guardIP, emPort, generation)
 		}
+		return up, true
 	})
 }
 
@@ -104,18 +104,18 @@ func (d *daemon) dropModelsLive(hostUUID string, id uint64) {
 // readModelsStream connects to one address and reads its models stream. Each
 // frame takes the successful-fetch path. guardIP is the node's canonical
 // address, the stale-result guard.
-func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, guardIP, host string, port int, id uint64) (healthy, tryNext bool) {
+func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, peerUUID, guardIP, host string, port int, id uint64) (up time.Duration, tryNext bool) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	url := "https://" + net.JoinHostPort(host, strconv.Itoa(port)) + modelsStreamPath
 	resp, tryNext := connectPeerStream(ctx, streamCtx, cancel, client, url, "models", hostUUID, host)
 	if resp == nil {
-		return false, tryNext
+		return 0, tryNext
 	}
 	defer resp.Body.Close()
-	opened := time.Now()
-	gotFrame := false
-	err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[modelInventory]{
+	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[modelInventory]{
+		Kind: "models", Peer: peerUUID,
+		Changed: d.peerChanged(),
 		Idle:    modelsStreamIdle,
 		MaxLine: modelsResponseBytes,
 		Current: func() bool {
@@ -139,10 +139,9 @@ func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, curr
 			// Live only once the frame is cached, so browse enrichment that
 			// defers to the stream finds its inventory.
 			d.markModelsLive(hostUUID, id)
-			gotFrame = true
 			return nil
 		},
 	})
 	slog.Debug("models stream ended", "host_uuid", hostUUID, "ip", host, "err", err)
-	return gotFrame && time.Since(opened) >= peerStreamHealthy, false
+	return outcome.Healthy, false
 }

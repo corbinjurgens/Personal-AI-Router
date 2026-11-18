@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -27,8 +28,198 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/ipc"
 	"nvpair-shared/noderec"
+	"nvpair-shared/reach"
 	"nvpair-shared/splitlisten"
 )
+
+type reverseStatsLogWriter struct{ lines chan []byte }
+
+func (w reverseStatsLogWriter) Write(p []byte) (int, error) {
+	w.lines <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+func TestReverseSetupStatsCountRounds(t *testing.T) {
+	old := clustertrust.DefaultPeerStats
+	stats := clustertrust.NewPeerStats()
+	clustertrust.DefaultPeerStats = stats
+	t.Cleanup(func() { clustertrust.DefaultPeerStats = old })
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	pairReverseManagers(t, a, b)
+	closedAddress := func() (string, int) {
+		t.Helper()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := listener.Addr().String()
+		port := listener.Addr().(*net.TCPAddr).Port
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return addr, port
+	}
+	first, firstPort := closedAddress()
+	last, lastPort := closedAddress()
+	node, ok := a.memberByUUID(b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("missing peer")
+	}
+	node = cloneClusterNode(node)
+	node.Port = firstPort
+	a.browser = newBrowser()
+	a.browser.seed(node.NodeUUID, "127.0.0.1", lastPort)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := a.dialReverseSession(ctx, *node)
+	if err == nil || !strings.Contains(err.Error(), first) || !strings.Contains(err.Error(), last) {
+		t.Fatalf("round did not fail at both addresses: %v", err)
+	}
+	logs := make(chan []byte, 1)
+	logCtx, logCancel := context.WithCancel(context.Background())
+	logDone := make(chan struct{})
+	go func() {
+		defer close(logDone)
+		stats.Log(logCtx, slog.New(slog.NewJSONHandler(reverseStatsLogWriter{logs}, nil)), time.Millisecond)
+	}()
+	defer func() { logCancel(); <-logDone }()
+	var line struct {
+		Deltas []struct {
+			Peer    string `json:"peer"`
+			Counter string `json:"counter"`
+			Stage   string `json:"stage"`
+			Value   int64  `json:"value"`
+		} `json:"deltas"`
+	}
+	select {
+	case data := <-logs:
+		if err := json.Unmarshal(data, &line); err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("missing counter log")
+	}
+	if len(line.Deltas) != 2 {
+		t.Fatalf("deltas = %+v, want only round and failure", line.Deltas)
+	}
+	for _, d := range line.Deltas {
+		if d.Peer != node.NodeUUID || d.Value != 1 {
+			t.Fatalf("delta = %+v", d)
+		}
+		switch d.Counter {
+		case "reverse_setup_rounds":
+			if d.Stage != "" {
+				t.Errorf("round stage = %q", d.Stage)
+			}
+		case "reverse_setup_failures":
+			if d.Stage != "dial" {
+				t.Errorf("failure stage = %q, want dial", d.Stage)
+			}
+		default:
+			t.Errorf("setup round changed logical dial counter: %+v", d)
+		}
+	}
+}
+
+func TestReverseSetupStage(t *testing.T) {
+	for _, tc := range []struct{ stage, want string }{
+		{"dial", "dial"}, {"TLS handshake", "tls"},
+		{"upgrade request", "upgrade"}, {"upgrade response", "upgrade"}, {"upgrade", "upgrade"},
+		{"handoff", "handoff"}, {"setup", "setup"},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			if got := reverseSetupStage(tc.stage); got != tc.want {
+				t.Fatalf("stage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// reverseRouteFixture gives the raw walk a silent recorded endpoint and a
+// fixture-owned working discovery endpoint. The chooser's dial describes a
+// blackholed SYN independently of the listener used to catch a wrong ordering.
+func reverseRouteFixture(t *testing.T, warm bool) (*Manager, ClusterNode, string, string) {
+	t.Helper()
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	startReverseHTTP(t, b, false)
+	pairReverseManagers(t, a, b)
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sockets sync.WaitGroup
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			sockets.Go(func() { defer conn.Close(); _, _ = io.Copy(io.Discard, conn) })
+		}
+	}()
+	t.Cleanup(func() { silent.Close(); <-stopped; sockets.Wait() })
+	node, ok := a.memberByUUID(b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("peer missing")
+	}
+	node = cloneClusterNode(node)
+	node.Port = silent.Addr().(*net.TCPAddr).Port
+	a.browser = newBrowser()
+	a.browser.seed(b.identity.NodeUUID, "127.0.0.1", b.port)
+	stale := silent.Addr().String()
+	working := net.JoinHostPort("127.0.0.1", strconv.Itoa(b.port))
+	var initial atomic.Bool
+	initial.Store(warm)
+	a.peerAddrs = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
+		if address == stale && !initial.Load() {
+			time.Sleep(timeout)
+			return nil, errors.New("blackholed SYN")
+		}
+		return net.DialTimeout(network, address, timeout)
+	}))
+	if warm {
+		if got := a.peerAddrs.ChooseWithin(context.Background(), node.NodeUUID, []string{stale, working}); got != stale {
+			t.Fatalf("warm choice = %q", got)
+		}
+	}
+	return a, *node, stale, working
+}
+
+func TestReverseColdWalkUsesConfirmedOrder(t *testing.T) {
+	a, node, _, _ := reverseRouteFixture(t, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := a.dialReverseSession(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed >= 2*time.Second {
+		t.Fatalf("cold setup took %v, want under 2s", elapsed)
+	}
+}
+
+func TestReverseWarmWalkPaysSetupBudgetAndRetiresFailedAddress(t *testing.T) {
+	oldTimeout := reverseSetupTimeout
+	reverseSetupTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { reverseSetupTimeout = oldTimeout })
+	a, node, stale, working := reverseRouteFixture(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := a.dialReverseSession(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < reverseSetupTimeout {
+		t.Fatalf("warm setup took %v, want at least the stale setup budget", elapsed)
+	}
+	// Both still accept TCP. Only the address-specific setup failure report can
+	// put the silent TLS endpoint behind the working endpoint on this new walk.
+	if got := a.peerAddrs.ChooseWithin(ctx, node.NodeUUID, []string{stale, working}); got != working {
+		t.Fatalf("choice after setup failure = %q, want %q", got, working)
+	}
+}
 
 type reverseProvenanceTestConn struct {
 	net.Conn
@@ -396,6 +587,50 @@ func newReverseTestManager(t *testing.T) *Manager {
 	manager.addSelfMember()
 	t.Cleanup(func() { manager.reverse.manager.Close() })
 	return manager
+}
+
+func TestReverseDialBacksOffAfterShortSessions(t *testing.T) {
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	startReverseHTTP(t, b, false)
+	pairReverseManagers(t, a, b)
+	a.reverseBackoff.NewRetry = func() *clustertrust.PeerRetry {
+		r := clustertrust.NewMemberRetry()
+		r.Jitter = func() float64 { return 1 }
+		return r
+	}
+	peer, ok := a.reversePeer(b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("missing admitted peer")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.reverse.wg.Add(1)
+	go a.reverseConnectLoop(ctx)
+	defer func() { cancel(); a.reverse.wg.Wait() }()
+	waitPresent := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(6 * time.Second)
+		for a.reverse.manager.Has(peer) != want && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if a.reverse.manager.Has(peer) != want {
+			t.Fatalf("session present != %v", want)
+		}
+	}
+	waitPresent(true)
+	for _, delay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		// Cross a supervisor tick while connected, which used to erase history.
+		time.Sleep(1100 * time.Millisecond)
+		closed := time.Now()
+		b.reverse.manager.Revoke(a.identity.NodeUUID)
+		waitPresent(false)
+		for time.Since(closed) < delay {
+			if a.reverse.manager.Has(peer) {
+				t.Fatalf("redial after %v, want >= %v", time.Since(closed), delay)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		waitPresent(true)
+	}
 }
 
 func pairReverseManagers(t *testing.T, a, b *Manager) {

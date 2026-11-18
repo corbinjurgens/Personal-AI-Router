@@ -47,6 +47,12 @@ type modelsStreamFixture struct {
 	status int
 }
 
+func TestModelsStreamRetryLadder(t *testing.T) {
+	f := newModelsStreamFixture(t, map[string]any{"models": []string{"a"}})
+	f.setStatus(http.StatusServiceUnavailable)
+	testScannerStreamRetry(t, f.d, func(ctx context.Context) { f.d.runModelsStream(ctx, "peer", 1) })
+}
+
 func newModelsStreamFixture(t *testing.T, first map[string]any) *modelsStreamFixture {
 	t.Helper()
 	selfDir := filepath.Join(t.TempDir(), "cluster")

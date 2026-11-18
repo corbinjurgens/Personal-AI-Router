@@ -22,7 +22,43 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
+	"nvpair-shared/reach"
 )
+
+func TestBroadcastLateFailureKeepsNewerAddress(t *testing.T) {
+	f := newWorkloadReverseFixture(t, nil)
+	b := f.m.broadcaster
+	b.addrs = reach.NewChooser(reach.WithDial(func(string, string, time.Duration) (net.Conn, error) {
+		left, right := net.Pipe()
+		right.Close()
+		return left, nil
+	}))
+	targets := b.peers.targets()
+	if len(targets) != 1 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	target := targets[0]
+	old, newer := target.candidates[0], "192.0.2.22:14321"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var moved atomic.Bool
+	f.configure(func(context.Context, string, string) (net.Conn, error) {
+		b.addrs.Forget(target.id)
+		if got := b.addrs.ChooseWithin(context.Background(), target.id, []string{newer, old}); got != newer {
+			t.Errorf("new choice = %q", got)
+		}
+		moved.Store(true)
+		cancel()
+		return nil, errors.New("late failure")
+	}, func(context.Context) (net.Conn, error) { return nil, errors.New("no reverse route") })
+	b.deliver(ctx, target, []byte(`{}`))
+	if !moved.Load() {
+		t.Fatal("delivery did not attempt old endpoint")
+	}
+	if got := b.addrs.ChooseWithin(context.Background(), target.id, []string{old, newer}); got != newer {
+		t.Fatalf("late broadcast failure retired newer address: %q", got)
+	}
+}
 
 type workloadReverseFixture struct {
 	m             *Manager

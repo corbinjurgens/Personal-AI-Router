@@ -4,6 +4,7 @@
 package clustertrust
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -25,6 +26,98 @@ import (
 )
 
 type serviceClientConnContextKey struct{}
+
+func TestPeerServiceClientPeerStatsBytes(t *testing.T) {
+	test := func(name string, plain, reuse, reverse bool) {
+		t.Run(name, func(t *testing.T) {
+			stats := isolatedPeerStats(t)
+			requestBytes := make(chan int, 2)
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var wire bytes.Buffer
+				if err := r.Write(&wire); err != nil {
+					t.Error(err)
+					return
+				}
+				requestBytes <- wire.Len()
+				w.Header().Set("Content-Length", "5")
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Header().Set("Date", "Wed, 18 Nov 2026 00:00:00 GMT")
+				writeServiceResponse(t, w, "hello")
+			})
+			f := newServiceClientFixture(t, handler)
+			f.adapter.opts.ReuseConnections = reuse
+			service, target := noderec.ServiceCluster, f.url
+			if plain {
+				server := httptest.NewServer(handler)
+				t.Cleanup(server.Close)
+				u, err := url.Parse(server.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				service, target = noderec.ServiceNodeInfo, server.URL
+				f.routes[service] = PeerServiceRoute{"v1", u.Host, ReversePlain, 1}
+				f.direct = func(ctx context.Context, _ noderec.ServiceKey) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "tcp", u.Host)
+				}
+			}
+			if reverse {
+				f.direct = func(context.Context, noderec.ServiceKey) (net.Conn, error) { return nil, errors.New("direct blocked") }
+			}
+			var sent, received int64
+			for range 2 {
+				method := http.MethodGet
+				var body io.Reader
+				if reuse {
+					method, body = http.MethodPost, strings.NewReader("request")
+				}
+				req, err := http.NewRequest(method, target, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := f.adapter.Client("peer", service).Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := resp.Body.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if string(data) != "hello" {
+					t.Fatalf("body = %q", data)
+				}
+				sent += int64(<-requestBytes)
+				resp.Body = io.NopCloser(bytes.NewReader(data))
+				var wire bytes.Buffer
+				if err := resp.Write(&wire); err != nil {
+					t.Fatal(err)
+				}
+				received += int64(wire.Len())
+			}
+			deltas, _ := stats.take()
+			if reverse {
+				sent, received = 0, 0
+			}
+			assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "bytes_written", View: "direct"}, sent)
+			assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "bytes_read", View: "direct"}, received)
+			attempts := int64(2)
+			if reuse || reverse {
+				attempts = 1
+			}
+			assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "dial_attempts", Route: "direct"}, attempts)
+			if reverse {
+				assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "dial_failures", Route: "direct"}, 1)
+				assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "dial_attempts", Route: "reverse"}, 2)
+			}
+		})
+	}
+	test("plain direct GET", true, false, false)
+	test("TLS direct GET", false, false, false)
+	test("reusable direct POST", false, true, false)
+	test("reverse GET", false, false, true)
+}
 
 type serviceClientFixture struct {
 	adapter      *PeerServiceClient
@@ -880,6 +973,91 @@ func TestPeerServiceClientPeriodicDirectRecovery(t *testing.T) {
 	if f.reverseCalls[noderec.ServiceCluster] != 1 {
 		t.Fatalf("healthy direct probe did not recover: reverse=%v", f.reverseCalls)
 	}
+}
+
+func TestPeerServiceClientDirectRecoveryAfterChange(t *testing.T) {
+	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { writeServiceResponse(t, w, "ok") }))
+	var changes testChanges
+	opts := f.adapter.opts
+	opts.Changed = changes.Changed
+	f.adapter = NewPeerServiceClient(f.mesh, opts)
+	reachable := f.direct
+	f.direct = func(context.Context, noderec.ServiceKey) (net.Conn, error) { return nil, errors.New("blocked") }
+	client := f.adapter.Client("peer", noderec.ServiceCluster)
+	serviceClientGet(t, client, f.url)
+	serviceClientGet(t, client, f.url)
+	f.mu.Lock()
+	f.direct = reachable
+	f.mu.Unlock()
+	changes.notify()
+	serviceClientGet(t, client, f.url)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.directCalls[noderec.ServiceCluster] != 2 || f.reverseCalls[noderec.ServiceCluster] != 2 {
+		t.Fatalf("direct=%v reverse=%v, want direct recovery", f.directCalls, f.reverseCalls)
+	}
+}
+
+func TestPeerServiceClientOldFailureAfterChange(t *testing.T) {
+	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { writeServiceResponse(t, w, "ok") }))
+	var changes testChanges
+	opts := f.adapter.opts
+	opts.Changed = changes.Changed
+	f.adapter = NewPeerServiceClient(f.mesh, opts)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	f.direct = func(ctx context.Context, _ noderec.ServiceKey) (net.Conn, error) {
+		close(entered)
+		select {
+		case <-release:
+			return nil, errors.New("old failure")
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	done := make(chan error, 1)
+	client := f.adapter.Client("peer", noderec.ServiceCluster)
+	go func() {
+		resp, err := client.Get(f.url)
+		if err == nil {
+			_, err = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	<-entered
+	changes.notify()
+	once.Do(func() { close(release) })
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	f.adapter.mu.Lock()
+	h := f.adapter.entries[peerServiceKey{"peer", noderec.ServiceCluster}]
+	next := h.nextProbe
+	f.adapter.mu.Unlock()
+	if !next.IsZero() {
+		t.Fatalf("old failure set cooldown: %v", next)
+	}
+}
+
+func TestPeerServiceClientIdleSurvivesChange(t *testing.T) {
+	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+		}
+		writeServiceResponse(t, w, "ok")
+	}))
+	var changes testChanges
+	opts := f.adapter.opts
+	opts.Changed, opts.ReuseConnections = changes.Changed, true
+	f.adapter = NewPeerServiceClient(f.mesh, opts)
+	t.Cleanup(f.adapter.CloseIdle)
+	client := f.adapter.Client("peer", noderec.ServiceCluster)
+	serviceClientPost(t, client, f.url)
+	changes.notify()
+	serviceClientPost(t, client, f.url)
+	f.assertDispatchConnections(t, 0, 0)
 }
 
 func TestPeerServiceClientDirectProbePreservesActiveReverseResponse(t *testing.T) {
@@ -2635,8 +2813,9 @@ func TestPeerServiceClientReusableCancellationPreservesConcurrentProbe(t *testin
 			// no longer retires the old probe; this case tests generation ownership.
 			f.adapter.mu.Lock()
 			previousHealth := f.adapter.entries[key]
+			epoch := f.adapter.epoch
 			f.adapter.mu.Unlock()
-			f.adapter.outcome(previousHealth, false)
+			f.adapter.outcome(previousHealth, false, epoch)
 			f.adapter.mu.Lock()
 			h := f.adapter.entries[key]
 			due := time.Now().Add(-time.Second)

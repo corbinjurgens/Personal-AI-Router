@@ -15,9 +15,8 @@
 // Backends are platform-specific (see netmon_windows.go / netmon_linux.go /
 // netmon_darwin.go) and fall back to periodic polling elsewhere
 // (netmon_poll.go). All backends funnel through the same Monitor, which
-// debounces bursts of OS events and only notifies subscribers when an actual
-// change is observed, so a spurious or duplicated OS event never produces a
-// spurious notification.
+// debounces bursts of OS events. It also reports wall-clock gaps over 15 seconds
+// as wakes. Route or link changes with unchanged addresses are not reported.
 package netmon
 
 import (
@@ -40,6 +39,12 @@ const (
 	// changes, and how often a native backend re-checks if it could not
 	// register for OS notifications.
 	pollInterval = 10 * time.Second
+)
+
+var (
+	wakeInterval = 5 * time.Second
+	wakeGap      = 15 * time.Second
+	wallNow      = func() time.Time { return time.Now().Round(0) }
 )
 
 // poll calls onEvent on a fixed interval until ctx is cancelled. It is the
@@ -160,10 +165,11 @@ func fingerprint(s Snapshot) string {
 type Monitor struct {
 	debounce time.Duration
 
-	mu   sync.RWMutex
-	snap Snapshot
-	fp   string
-	subs []chan struct{}
+	mu      sync.RWMutex
+	snap    Snapshot
+	fp      string
+	subs    []chan struct{}
+	changed chan struct{}
 }
 
 // Watch starts a Monitor that runs until ctx is cancelled. The platform
@@ -189,6 +195,9 @@ func Watch(ctx context.Context) (*Monitor, error) {
 }
 
 func (m *Monitor) loop(ctx context.Context, events <-chan struct{}) {
+	ticker := time.NewTicker(wakeInterval)
+	defer ticker.Stop()
+	previous := wallNow()
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {
@@ -217,32 +226,39 @@ func (m *Monitor) loop(ctx context.Context, events <-chan struct{}) {
 		case <-timerC:
 			timer = nil
 			timerC = nil
-			m.refresh()
+			m.refresh(false)
+		case <-ticker.C:
+			now := wallNow()
+			if now.Sub(previous) > wakeGap {
+				m.refresh(true)
+			}
+			previous = now
 		}
 	}
 }
 
-func (m *Monitor) refresh() {
+func (m *Monitor) refresh(wake bool) {
 	next := Enumerate()
 	nextFP := fingerprint(next)
 
 	m.mu.Lock()
-	if nextFP == m.fp {
+	if nextFP == m.fp && !wake {
 		m.mu.Unlock()
 		return
 	}
 	m.snap = next
 	m.fp = nextFP
-	subs := make([]chan struct{}, len(m.subs))
-	copy(subs, m.subs)
-	m.mu.Unlock()
-
-	for _, ch := range subs {
+	if m.changed != nil {
+		close(m.changed)
+	}
+	m.changed = make(chan struct{})
+	for _, ch := range m.subs {
 		select {
 		case ch <- struct{}{}:
 		default:
 		}
 	}
+	m.mu.Unlock()
 }
 
 func (m *Monitor) closeSubs() {
@@ -255,7 +271,8 @@ func (m *Monitor) closeSubs() {
 }
 
 // Subscribe returns a channel that receives a value whenever the addressing
-// changes. The channel is buffered (depth 1) and notifications coalesce, so a
+// changes or a wake is detected. Use Subscribe for long-lived loops, and Changed
+// for waiters that come and go. The channel is buffered (depth 1) and notifications coalesce, so a
 // slow consumer never blocks the Monitor and only learns "something changed,
 // re-read Snapshot". The channel is closed when the Monitor's context ends.
 func (m *Monitor) Subscribe() <-chan struct{} {
@@ -264,6 +281,18 @@ func (m *Monitor) Subscribe() <-chan struct{} {
 	m.subs = append(m.subs, ch)
 	m.mu.Unlock()
 	return ch
+}
+
+// Changed returns the current generation channel, closed on the next address
+// change or wake. It remains open when the monitor stops; waiters must also
+// observe their own context.
+func (m *Monitor) Changed() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.changed == nil {
+		m.changed = make(chan struct{})
+	}
+	return m.changed
 }
 
 // Snapshot returns a defensive copy of the current addressing state.

@@ -767,3 +767,287 @@ func TestChooseIsConcurrencySafe(t *testing.T) {
 		t.Fatalf("Choose = %q, want the accepting address", got)
 	}
 }
+
+func TestForgetAddrRetiresOnlyTheFailedChoice(t *testing.T) {
+	f := newFakeNet("first", "second")
+	c := NewChooser(WithDial(f.dial))
+	candidates := []string{"first", "second"}
+	if got := choose(c, "peer", candidates); got != "first" {
+		t.Fatalf("initial choice = %q", got)
+	}
+	c.ForgetAddr("peer", "first")
+	if got := choose(c, "peer", candidates); got != "second" {
+		t.Fatalf("choice after failure = %q, want second", got)
+	}
+	c.ForgetAddr("peer", "first")
+	c.mu.Lock()
+	e, cached := c.cache["peer"]
+	c.mu.Unlock()
+	if !cached || !e.settled || e.address != "second" {
+		t.Fatalf("late failure retired newer choice: %+v, cached = %v", e, cached)
+	}
+	if got := choose(c, "peer", candidates); got != "second" {
+		t.Fatalf("late failure replaced newer choice with %q", got)
+	}
+}
+
+func TestSuspectAddressExpires(t *testing.T) {
+	f := newFakeNet("first", "second")
+	c := NewChooser(WithDial(f.dial))
+	now := time.Now()
+	c.clock = func() time.Time { return now }
+	c.ForgetAddr("peer", "first")
+	candidates := []string{"first", "second"}
+	if got := choose(c, "peer", candidates); got != "second" {
+		t.Fatalf("suspect ordering chose %q, want second", got)
+	}
+	now = now.Add(SuspectFor)
+	c.Forget("peer")
+	if got := choose(c, "peer", candidates); got != "first" {
+		t.Fatalf("expired suspect ordering chose %q, want first", got)
+	}
+}
+
+func TestSuspectAddressRemainsAFallback(t *testing.T) {
+	c := NewChooser(WithDial(newFakeNet("first").dial))
+	c.ForgetAddr("peer", "first")
+	if got := choose(c, "peer", []string{"first", "refuses"}); got != "first" {
+		t.Fatalf("choice = %q, want accepting suspect address", got)
+	}
+}
+
+const returnLAN = "192.168.1.2:14321"
+const returnVPN = "100.64.1.2:14321"
+
+type fakeChanges struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (f *fakeChanges) changed() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ch
+}
+
+func (f *fakeChanges) fire() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	close(f.ch)
+	f.ch = make(chan struct{})
+}
+
+func returnChooser(t *testing.T, verify func(context.Context, string, string) error) (*Chooser, *fakeChanges) {
+	t.Helper()
+	f := newFakeNet(returnVPN)
+	changes := &fakeChanges{ch: make(chan struct{})}
+	c := NewChooser(WithDial(f.dial), WithVerify(verify), WithChanged(changes.changed))
+	if got := choose(c, "peer", []string{returnLAN, returnVPN}); got != returnVPN {
+		t.Fatalf("initial choice = %q, want VPN", got)
+	}
+	f.mu.Lock()
+	f.accept[returnLAN] = true
+	f.mu.Unlock()
+	return c, changes
+}
+
+func waitReturn(t *testing.T, c *Chooser) {
+	t.Helper()
+	waitFor(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.returning["peer"] == nil
+	}, "return check to finish")
+}
+
+func TestReturnAfterNetworkChange(t *testing.T) {
+	var checks atomic.Int32
+	c, changes := returnChooser(t, func(_ context.Context, key, address string) error {
+		if key != "peer" || address != returnLAN {
+			return errors.New("unexpected verification target")
+		}
+		checks.Add(1)
+		return nil
+	})
+	changes.fire()
+	if got := choose(c, "peer", []string{returnLAN, returnVPN}); got != returnVPN {
+		t.Fatalf("triggering call = %q, want current VPN address", got)
+	}
+	waitReturn(t, c)
+	if got := choose(c, "peer", []string{returnLAN, returnVPN}); got != returnLAN || checks.Load() != 1 {
+		t.Fatalf("later choice = %q, checks = %d, want verified LAN/1", got, checks.Load())
+	}
+}
+
+func TestReturnVerificationFailureMakesAddressSuspect(t *testing.T) {
+	var checks atomic.Int32
+	c, changes := returnChooser(t, func(context.Context, string, string) error {
+		checks.Add(1)
+		return errors.New("wrong pin")
+	})
+	candidates := []string{returnLAN, returnVPN}
+	choose(c, "peer", candidates)
+	waitReturn(t, c)
+	if got := choose(c, "peer", candidates); got != returnVPN || checks.Load() != 1 {
+		t.Fatalf("choice = %q, checks = %d, want VPN/1 before next interval", got, checks.Load())
+	}
+	c.mu.Lock()
+	suspect := c.now().Before(c.suspect["peer"][returnLAN])
+	c.mu.Unlock()
+	if !suspect {
+		t.Fatal("failed verification did not mark LAN suspect")
+	}
+	c.ForgetAddr("peer", returnVPN)
+	if got := choose(c, "peer", candidates); got != returnLAN {
+		// Both addresses are suspect, so the original list order remains.
+		t.Fatalf("all-suspect fallback = %q, want LAN", got)
+	}
+	changes.fire()
+	c.Prefer("other", nil)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.suspect) != 0 {
+		t.Fatal("network change did not clear all suspect addresses")
+	}
+}
+
+func TestReturnRequiresVerifierAndBetterClass(t *testing.T) {
+	t.Run("no verifier", func(t *testing.T) {
+		c, changes := returnChooser(t, nil)
+		changes.fire()
+		if got := choose(c, "peer", []string{returnLAN, returnVPN}); got != returnVPN {
+			t.Fatalf("choice without verifier = %q", got)
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if len(c.returning) != 0 {
+			t.Fatal("started check without verification")
+		}
+	})
+	t.Run("best class already selected", func(t *testing.T) {
+		var checks atomic.Int32
+		c := NewChooser(WithDial(newFakeNet(returnLAN, returnVPN).dial), WithVerify(func(context.Context, string, string) error {
+			checks.Add(1)
+			return nil
+		}))
+		for range 2 {
+			if got := choose(c, "peer", []string{returnLAN, returnVPN}); got != returnLAN {
+				t.Fatalf("choice = %q", got)
+			}
+		}
+		if checks.Load() != 0 {
+			t.Fatal("checked while already on best class")
+		}
+	})
+}
+
+func TestReturnInterval(t *testing.T) {
+	var checks atomic.Int32
+	c, _ := returnChooser(t, func(context.Context, string, string) error {
+		checks.Add(1)
+		return errors.New("still unavailable")
+	})
+	now := time.Now()
+	c.clock = func() time.Time { return now }
+	candidates := []string{returnLAN, returnVPN}
+	choose(c, "peer", candidates)
+	waitReturn(t, c)
+	choose(c, "peer", candidates)
+	if checks.Load() != 1 {
+		t.Fatalf("checks before interval = %d, want 1", checks.Load())
+	}
+	c.mu.Lock()
+	now = now.Add(ReturnCheckEvery)
+	c.mu.Unlock()
+	choose(c, "peer", candidates)
+	waitReturn(t, c)
+	if checks.Load() != 2 {
+		t.Fatalf("checks after interval = %d, want 2", checks.Load())
+	}
+}
+
+func TestReturnDiscardsStaleChecks(t *testing.T) {
+	test := func(name string, invalidate func(*Chooser, *fakeChanges)) {
+		t.Run(name, func(t *testing.T) {
+			entered, release := make(chan struct{}, 2), make(chan struct{})
+			var checks atomic.Int32
+			c, changes := returnChooser(t, func(context.Context, string, string) error {
+				checks.Add(1)
+				entered <- struct{}{}
+				<-release
+				return nil
+			})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			candidates := []string{returnLAN, returnVPN}
+			c.mu.Lock()
+			token := &returnToken{c.generation["peer"], c.cache["peer"].fingerprint, c.networkEpoch}
+			c.returning["peer"] = token
+			c.mu.Unlock()
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				c.checkReturn("peer", returnVPN, candidates[:1], token)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("return check did not enter verification")
+			}
+			invalidate(c, changes)
+			unblock()
+			select {
+			case <-finished:
+			case <-time.After(time.Second):
+				t.Fatal("old check did not finish")
+			}
+			c.mu.Lock()
+			address := c.cache["peer"].address
+			c.mu.Unlock()
+			if address == returnLAN {
+				t.Fatal("stale verification installed LAN")
+			}
+		})
+	}
+	test("failure report", func(c *Chooser, _ *fakeChanges) { c.ForgetAddr("peer", returnVPN) })
+	test("candidate list changed", func(c *Chooser, _ *fakeChanges) { c.Prefer("peer", []string{returnVPN}) })
+	test("network changed", func(c *Chooser, changes *fakeChanges) { changes.fire() })
+}
+
+func TestConcurrentCallsSingleFlightReturn(t *testing.T) {
+	entered, release := make(chan struct{}, 10), make(chan struct{})
+	var checks atomic.Int32
+	c, changes := returnChooser(t, func(context.Context, string, string) error {
+		checks.Add(1)
+		entered <- struct{}{}
+		<-release
+		return nil
+	})
+	defer close(release)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() { choose(c, "peer", []string{returnLAN, returnVPN}) })
+	}
+	wg.Wait()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("check did not start")
+	}
+	if checks.Load() != 1 {
+		t.Fatalf("concurrent calls started %d checks", checks.Load())
+	}
+	// A network change releases only the old epoch's reservation. A new check
+	// may start without waiting for the obsolete verification to return.
+	changes.fire()
+	choose(c, "peer", []string{returnLAN, returnVPN})
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("network change did not allow a new check")
+	}
+	if checks.Load() != 2 {
+		t.Fatalf("checks after change = %d, want 2", checks.Load())
+	}
+}

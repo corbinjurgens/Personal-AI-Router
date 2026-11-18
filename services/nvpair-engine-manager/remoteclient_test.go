@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +16,30 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/reach"
 )
+
+func TestRemoteClientLateFailureKeepsNewerAddress(t *testing.T) {
+	f := newRemoteReverseFixture(t, func(*clustertrust.Mesh) http.Handler {
+		return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	})
+	f.m.addrs = reach.NewChooser(reach.WithDial(func(string, string, time.Duration) (net.Conn, error) {
+		left, right := net.Pipe()
+		right.Close()
+		return left, nil
+	}))
+	old := f.server.Listener.Addr().String()
+	newer := "192.0.2.22:14321"
+	client := f.client(t, context.Background())
+	f.m.addrs.Forget("host-peer")
+	if got := f.m.addrs.ChooseWithin(context.Background(), "host-peer", []string{newer, old}); got != newer {
+		t.Fatalf("new choice = %q", got)
+	}
+	client.forgetAddress()
+	if got := f.m.addrs.ChooseWithin(context.Background(), "host-peer", []string{old, newer}); got != newer {
+		t.Fatalf("late remote-client failure retired newer address: %q", got)
+	}
+}
 
 func mustRemoteSettingJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()

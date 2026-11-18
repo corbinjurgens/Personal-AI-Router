@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -58,13 +59,15 @@ type enginesPublisher struct {
 	signal  chan struct{}
 	readers atomic.Int64
 
-	mu   sync.Mutex // serializes rebuilds; guards list and last
+	mu   sync.Mutex // serializes rebuilds; guards list
 	list func() []EngineStatus
-	last []byte
 }
 
 func newEnginesPublisher() *enginesPublisher {
-	return &enginesPublisher{signal: make(chan struct{}, 1)}
+	return &enginesPublisher{
+		hub:    clustertrust.SnapshotHub[json.RawMessage]{RetainWhileRead: true},
+		signal: make(chan struct{}, 1),
+	}
 }
 
 // poke asks for a rebuild after enginesRebuildDelay. It never blocks.
@@ -89,19 +92,19 @@ func (p *enginesPublisher) rebuild() {
 	if p.list == nil {
 		return
 	}
+	epoch := p.hub.Epoch()
 	raw, err := json.Marshal(map[string]any{"engines": p.list()})
-	if err != nil || bytes.Equal(raw, p.last) {
+	last, has := p.hub.Latest()
+	if err != nil || (has && bytes.Equal(raw, last)) {
 		return
 	}
-	p.last = raw
-	p.hub.Publish(json.RawMessage(raw))
+	p.hub.PublishAt(epoch, json.RawMessage(raw))
 }
 
 // subscribe adds a stream reader and asks run for a rebuild. The reader gets
-// the last published list at once, if any; after a period with no readers that
-// list may be old, and the rebuild (about enginesRebuildDelay later) sends the
-// current one if it differs. Straight after start-up nothing is published, so
-// the first reader waits for that rebuild. The rebuild is left to run rather than done here
+// the last published list at once, if any. After a period with no readers, the
+// first reader waits for a fresh rebuild, as after start-up. A rebuild collected
+// before that idle period is discarded. The rebuild is left to run rather than done here
 // because it can wait up to the bounded read budget per busy engine (see
 // publishedStatuses), and the stream must open without waiting for it.
 func (p *enginesPublisher) subscribe() (<-chan json.RawMessage, func(), bool) {
@@ -211,12 +214,13 @@ func (c *remoteEngineCache) answer(nodeID string) (json.RawMessage, error) {
 // consumeEnginesStream subscribes to one peer's engine-status stream until it
 // ends, keeping the peer's cache entry while it is live and notifying each
 // change of its list.
-func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
+func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) time.Duration {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	response, current, ok := m.openPeerStream(ctx, peer, controlEnginesPath+"/events")
-	if !ok {
-		return
+	response, current, reason := m.openPeerStream(ctx, peer, controlEnginesPath+"/events")
+	defer func() { slog.Debug("peer stream ended", "kind", "engines", "node", peer.nodeID, "reason", reason) }()
+	if response == nil {
+		return 0
 	}
 	defer response.Body.Close()
 	entry := &remoteEnginesEntry{current: current}
@@ -229,7 +233,8 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 		// A replacement stream for this peer is already live; this one was
 		// superseded while it was opening.
 		cache.mu.Unlock()
-		return
+		reason = "superseded"
+		return 0
 	}
 	cache.peers[peer.nodeID] = entry
 	cache.mu.Unlock()
@@ -245,7 +250,9 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 		entry.lineAt = time.Now()
 		cache.mu.Unlock()
 	}
-	_ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[json.RawMessage]{
+	outcome, _ := clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[json.RawMessage]{
+		Kind: "engines", Peer: peer.clusterUUID,
+		Changed:     m.changed,
 		Idle:        enginesStreamIdle,
 		Recheck:     enginesStreamRecheck,
 		MaxLine:     enginesStreamMaxLine,
@@ -279,4 +286,6 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 			return nil
 		},
 	})
+	reason = string(outcome.End)
+	return outcome.Healthy
 }

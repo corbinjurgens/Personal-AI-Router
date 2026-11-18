@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +34,12 @@ type SnapshotStreamServer[T any] struct {
 func ServeSnapshotStream[T any](w http.ResponseWriter, r *http.Request, s SnapshotStreamServer[T]) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	controller := http.NewResponseController(w)
+	if !s.Authorize() {
+		return
+	}
+	if controller.Flush() != nil {
+		return
+	}
 	send := func(value any) bool {
 		if !s.Authorize() {
 			return false
@@ -64,6 +72,9 @@ func ServeSnapshotStream[T any](w http.ResponseWriter, r *http.Request, s Snapsh
 
 // SnapshotStreamClient configures ReadSnapshotStream.
 type SnapshotStreamClient[T any] struct {
+	Kind        string                  // bounded service name for process-local counters
+	Peer        string                  // admitted peer UUID for process-local counters
+	Changed     func() <-chan struct{}  // optional address-change/wake source
 	Idle        time.Duration           // cancel when no line (keepalives included) arrives within Idle; required
 	Recheck     time.Duration           // also call Current on this interval; 0 = before every line only
 	MaxLine     int                     // maximum line length in bytes; required
@@ -72,6 +83,26 @@ type SnapshotStreamClient[T any] struct {
 	OnFrame     func(T) error           // called for every decoded line; an error ends the stream
 	OnKeepalive func()                  // optional; called for every null line
 }
+
+var streamWallNow = func() time.Time { return time.Now().Round(0) }
+
+// StreamOutcome describes the accepted portion of one snapshot stream.
+type StreamOutcome struct {
+	Healthy time.Duration // first accepted frame to last received line; zero without an accepted frame
+	End     StreamEnd
+}
+
+type StreamEnd string
+
+const (
+	StreamEndEOF       StreamEnd = "eof"
+	StreamEndIdle      StreamEnd = "idle"
+	StreamEndAuthority StreamEnd = "authority"
+	StreamEndDecode    StreamEnd = "decode"
+	StreamEndRefused   StreamEnd = "refused"
+	StreamEndCancelled StreamEnd = "cancelled"
+	StreamEndError     StreamEnd = "error"
+)
 
 // ReadSnapshotStream reads body until EOF, a read, decode or OnFrame error, ctx
 // end, the idle timeout or Current returning false, and calls cancel on every
@@ -82,8 +113,63 @@ type SnapshotStreamClient[T any] struct {
 // of a request made with ctx), so cancellation unblocks the read. When Recheck
 // is set, Current is called from a second goroutine and must be safe for
 // concurrent use.
-func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, body io.Reader, c SnapshotStreamClient[T]) error {
-	defer cancel()
+func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, body io.Reader, c SnapshotStreamClient[T]) (outcome StreamOutcome, err error) {
+	stats := DefaultPeerStats
+	stats.StreamOpened(c.Peer, c.Kind)
+	defer func() { stats.StreamEnded(c.Peer, c.Kind, string(outcome.End)) }()
+	var mu sync.Mutex
+	var reason StreamEnd
+	stop := func(end StreamEnd) {
+		mu.Lock()
+		if reason == "" {
+			reason = end
+		}
+		mu.Unlock()
+		cancel()
+	}
+	stopped := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return reason != ""
+	}
+	now := streamWallNow
+	var lastLine atomic.Int64
+	if c.Changed != nil {
+		lastLine.Store(now().UnixNano())
+		changed := c.Changed()
+		watchDone := make(chan struct{})
+		defer close(watchDone)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-watchDone:
+					return
+				case <-changed:
+					changed = c.Changed()
+					if now().Sub(time.Unix(0, lastLine.Load())) >= c.Idle {
+						stop(StreamEndIdle)
+						return
+					}
+				}
+			}
+		}()
+	}
+	var first, last time.Time
+	defer func() {
+		mu.Lock()
+		if reason != "" {
+			outcome.End = reason
+		} else if outcome.End == "" && ctx.Err() != nil {
+			outcome.End = StreamEndCancelled
+		}
+		mu.Unlock()
+		if !first.IsZero() {
+			outcome.Healthy = last.Sub(first)
+		}
+		cancel()
+	}()
 	if c.Recheck > 0 {
 		go func() {
 			ticker := time.NewTicker(c.Recheck)
@@ -94,21 +180,33 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 					return
 				case <-ticker.C:
 					if !c.Current() {
-						cancel()
+						stop(StreamEndAuthority)
 						return
 					}
 				}
 			}
 		}()
 	}
-	watchdog := time.AfterFunc(c.Idle, cancel)
+	watchdog := time.AfterFunc(c.Idle, func() { stop(StreamEndIdle) })
 	defer watchdog.Stop()
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), c.MaxLine)
 	for scanner.Scan() {
-		if !c.Current() {
-			return context.Canceled
+		stats.StreamBytes(c.Peer, c.Kind, int64(len(scanner.Bytes())))
+		if c.Changed != nil {
+			lastLine.Store(now().UnixNano())
 		}
+		if stopped() || ctx.Err() != nil {
+			return outcome, context.Canceled
+		}
+		if !c.Current() {
+			stop(StreamEndAuthority)
+			return outcome, context.Canceled
+		}
+		if stopped() || ctx.Err() != nil {
+			return outcome, context.Canceled
+		}
+		last = time.Now()
 		watchdog.Reset(c.Idle)
 		line := scanner.Bytes()
 		if bytes.Equal(bytes.TrimSpace(line), []byte("null")) {
@@ -119,14 +217,26 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 		}
 		value, err := c.Decode(line)
 		if err != nil {
-			return err
+			outcome.End = StreamEndDecode
+			return outcome, err
+		}
+		if stopped() || ctx.Err() != nil {
+			return outcome, context.Canceled
 		}
 		if err := c.OnFrame(value); err != nil {
-			return err
+			outcome.End = StreamEndRefused
+			return outcome, err
+		}
+		if first.IsZero() {
+			first = last
 		}
 	}
 	if ctx.Err() != nil {
-		return context.Canceled
+		return outcome, context.Canceled
 	}
-	return scanner.Err()
+	outcome.End = StreamEndEOF
+	if scanner.Err() != nil {
+		outcome.End = StreamEndError
+	}
+	return outcome, scanner.Err()
 }
