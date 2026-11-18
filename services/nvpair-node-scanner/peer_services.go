@@ -156,7 +156,7 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 	isNew, routeChanged := d.dir.installPeerServices(claim, node)
 	node, _ = d.dir.get(hostUUID)
 	if routeChanged {
-		d.invalidatePeerServicesRoute(hostUUID)
+		logOutageNotifyError("errors:clear", hostUUID, d.invalidatePeerServicesRoute(hostUUID))
 	}
 	method := noderec.NotifyNodeUpdated
 	if isNew {
@@ -270,7 +270,28 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 // eviction.
 func (d *daemon) reconcilePeerServices() {
 	d.peerServicesMu.Lock()
-	defer d.peerServicesMu.Unlock()
+	// Keep notification ordering under the claim fence. Log only after
+	// releasing it so a blocked logger cannot delay frame application.
+	var diagnostics []func()
+	defer func() {
+		d.peerServicesMu.Unlock()
+		for _, log := range diagnostics {
+			log()
+		}
+	}()
+	emit := func(method string, node noderec.DirectoryNode) {
+		if err := d.notifyNode(method, node); err != nil {
+			diagnostics = append(diagnostics, func() { logNodeNotifyError(method, err) })
+		}
+	}
+	logOutage := func(method, hostUUID string, err error) {
+		if err != nil {
+			diagnostics = append(diagnostics, func() { logOutageNotifyError(method, hostUUID, err) })
+		}
+	}
+	report := func(hostUUID, message string) {
+		logOutage("errors:report", hostUUID, d.notifyUnreachable(hostUUID, message))
+	}
 	d.dir.mu.RLock()
 	claims := maps.Clone(d.dir.peerServices)
 	d.dir.mu.RUnlock()
@@ -297,21 +318,23 @@ func (d *daemon) reconcilePeerServices() {
 		}
 	}
 	for _, node := range changed {
-		d.invalidatePeerServicesRoute(node.HostUUID)
-		d.emit(noderec.NotifyNodeUpdated, node)
+		logOutage("errors:clear", node.HostUUID, d.invalidatePeerServicesRoute(node.HostUUID))
+		emit(noderec.NotifyNodeUpdated, node)
 	}
 	for _, node := range removed {
-		d.forget(node.HostUUID)
-		d.emit(noderec.NotifyNodeRemoved, node)
+		logOutage("errors:clear", node.HostUUID, d.forgetAndClearUnreachable(node.HostUUID))
+		emit(noderec.NotifyNodeRemoved, node)
 	}
 	// After the loops above: reverting or forgetting a node clears its report, and
 	// this one has to outlive that.
 	for _, node := range lapsed {
-		d.reportUnreachable(node.HostUUID, fmt.Sprintf("Paired node %q has stopped answering over its reverse session for %s; it may be unreachable from this machine",
+		report(node.HostUUID, fmt.Sprintf("Paired node %q has stopped answering over its reverse session for %s; it may be unreachable from this machine",
 			nodeLabel(node), peerServicesMaxAge))
 	}
-	d.reportSilentPeers(time.Now())
-	d.clearUnpairedReports()
+	d.reportSilentPeers(time.Now(), report)
+	d.clearUnpairedReports(func(hostUUID string) {
+		logOutage("errors:clear", hostUUID, d.notifyClearUnreachable(hostUUID))
+	})
 }
 
 // retirePeerService runs under peerServicesMu, which fences claim replacement.
@@ -385,7 +408,7 @@ func (d *daemon) retirePeerService(hostUUID string) (old, restored noderec.Direc
 // its upsert, which happens outside peerServicesMu. And a peer missed at the look
 // (its pin mid-rewrite, or the mesh not yet clustered) is not looked at again
 // until the scanner restarts.
-func (d *daemon) reportSilentPeers(now time.Time) {
+func (d *daemon) reportSilentPeers(now time.Time, report func(string, string)) {
 	if d.startupPeersChecked || d.startedAt.IsZero() || now.Sub(d.startedAt) < peerServicesMaxAge {
 		return
 	}
@@ -397,7 +420,7 @@ func (d *daemon) reportSilentPeers(now time.Time) {
 		if _, known := d.dir.get(hostUUID); known {
 			continue
 		}
-		d.reportUnreachable(hostUUID, fmt.Sprintf("Paired node %q has not been reachable over its reverse session since this node started; it may be unreachable from this machine",
+		report(hostUUID, fmt.Sprintf("Paired node %q has not been reachable over its reverse session since this node started; it may be unreachable from this machine",
 			nodeLabel(noderec.DirectoryNode{HostUUID: hostUUID})))
 	}
 }

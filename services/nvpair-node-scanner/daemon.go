@@ -1403,10 +1403,14 @@ func nodeLabel(node noderec.DirectoryNode) string {
 // reportUnreachable puts a peer's outage in the errors view, once. Repeating
 // the call while the outage stands sends nothing.
 func (d *daemon) reportUnreachable(hostUUID, message string) {
-	if d.setUnreachableReported(hostUUID, true) {
-		return
+	logOutageNotifyError("errors:report", hostUUID, d.notifyUnreachable(hostUUID, message))
+}
+
+func (d *daemon) notifyUnreachable(hostUUID, message string) error {
+	if d.setUnreachableReported(hostUUID, true) || d.codec == nil {
+		return nil
 	}
-	d.emitError(sharederrors.ServiceError{
+	return d.codec.Notify("errors:report", sharederrors.ServiceError{
 		ID:       nodeInfoUnreachableID(hostUUID),
 		Message:  message,
 		Severity: "warning",
@@ -1416,9 +1420,14 @@ func (d *daemon) reportUnreachable(hostUUID, message string) {
 
 // clearUnreachable takes a peer's outage out of the errors view if it is there.
 func (d *daemon) clearUnreachable(hostUUID string) {
-	if d.setUnreachableReported(hostUUID, false) {
-		d.emitErrorClear(hostUUID)
+	logOutageNotifyError("errors:clear", hostUUID, d.notifyClearUnreachable(hostUUID))
+}
+
+func (d *daemon) notifyClearUnreachable(hostUUID string) error {
+	if !d.setUnreachableReported(hostUUID, false) || d.codec == nil {
+		return nil
 	}
+	return d.codec.Notify("errors:clear", sharederrors.ClearParams{ID: nodeInfoUnreachableID(hostUUID)})
 }
 
 // setUnreachableReported records whether hostUUID's outage is in the errors view
@@ -1443,7 +1452,7 @@ func (d *daemon) setUnreachableReported(hostUUID string, on bool) (was bool) {
 // clearUnpairedReports takes out the report of any peer that is no longer
 // paired, which no enrichment would otherwise notice: a peer that stops being
 // trusted stops being enriched, so nothing else would clear its entry.
-func (d *daemon) clearUnpairedReports() {
+func (d *daemon) clearUnpairedReports(clearReport func(string)) {
 	d.infoMu.Lock()
 	hosts := slices.Collect(maps.Keys(d.nodeInfoReported))
 	d.infoMu.Unlock()
@@ -1453,30 +1462,14 @@ func (d *daemon) clearUnpairedReports() {
 			principal = node.ClusterUUID
 		}
 		if !d.mesh.HasPin(principal) {
-			d.clearUnreachable(hostUUID)
+			clearReport(hostUUID)
 		}
 	}
 }
 
-// emitError and emitErrorClear push errors:report / errors:clear to the broker,
-// which stamps the origin nodeId and timestamp and forwards them to
-// nvpair-errors. Nil-codec-safe for the same reason as emit.
-func (d *daemon) emitError(e sharederrors.ServiceError) {
-	if d.codec == nil {
-		return
-	}
-	if err := d.codec.Notify("errors:report", e); err != nil {
-		slog.Warn("failed to send errors:report", "id", e.ID, "err", err)
-	}
-}
-
-func (d *daemon) emitErrorClear(hostUUID string) {
-	if d.codec == nil {
-		return
-	}
-	id := nodeInfoUnreachableID(hostUUID)
-	if err := d.codec.Notify("errors:clear", sharederrors.ClearParams{ID: id}); err != nil {
-		slog.Warn("failed to send errors:clear", "id", id, "err", err)
+func logOutageNotifyError(method, hostUUID string, err error) {
+	if err != nil {
+		slog.Warn("failed to send "+method, "id", nodeInfoUnreachableID(hostUUID), "err", err)
 	}
 }
 
@@ -1745,7 +1738,7 @@ func logReportedClusterIdentity(node noderec.DirectoryNode, err error) {
 
 // invalidatePeerServicesRoute discards endpoint-derived state while retaining
 // independently observed host activity across a source or route change.
-func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
+func (d *daemon) invalidatePeerServicesRoute(hostUUID string) error {
 	d.enrichHosts.forget(hostKey{hostUUID: hostUUID, service: noderec.ServiceNodeInfo})
 	d.enrichHosts.forget(hostKey{hostUUID: hostUUID, service: noderec.ServiceEngineManager})
 	d.peerMu.Lock()
@@ -1770,18 +1763,23 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 	}
 	delete(d.nodeInfoDown, hostUUID)
 	d.infoMu.Unlock()
-	d.clearUnreachable(hostUUID)
+	return d.notifyClearUnreachable(hostUUID)
 }
 
 // forget drops all cached state only when the last directory claim disappears.
 func (d *daemon) forget(hostUUID string) {
-	d.invalidatePeerServicesRoute(hostUUID)
+	logOutageNotifyError("errors:clear", hostUUID, d.forgetAndClearUnreachable(hostUUID))
+}
+
+func (d *daemon) forgetAndClearUnreachable(hostUUID string) error {
+	err := d.invalidatePeerServicesRoute(hostUUID)
 	d.infoMu.Lock()
 	delete(d.lastDownloads, hostUUID)
 	d.infoMu.Unlock()
 	d.activityMu.Lock()
 	delete(d.lastActivityAt, hostUUID)
 	d.activityMu.Unlock()
+	return err
 }
 
 // noteActivity records that a peer returned inference response bytes msSince

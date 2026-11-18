@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -286,6 +288,35 @@ func TestPeerServicesExpiryRemovesOnlyAuthenticatedClaim(t *testing.T) {
 	}
 	if d.acceptPeerServices(claim) {
 		t.Fatal("replay after retirement accepted")
+	}
+}
+
+func TestPeerServicesRetirementLogsAfterUnlock(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	claim.ObservedAt = time.Now().Add(-peerServicesMaxAge).UnixMilli()
+	d.dir.installPeerServices(claim, noderec.DirectoryNode{HostUUID: "peer", ClusterUUID: "peer"})
+	d.setUnreachableReported("peer", true)
+	d.codec = NewCodec(closedFrameWriter{})
+	logger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(logger) })
+	var messages []string
+	slog.SetDefault(slog.New(frameLogLockCheck{
+		Handler: logger.Handler(),
+		check: func(r slog.Record) {
+			messages = append(messages, r.Message)
+			if !d.peerServicesMu.TryLock() {
+				t.Errorf("%q logged while holding peerServicesMu", r.Message)
+				return
+			}
+			d.peerServicesMu.Unlock()
+		},
+	}))
+
+	d.reconcilePeerServices()
+
+	want := []string{"failed to send errors:clear", "failed to emit node event", "failed to send errors:report"}
+	if !slices.Equal(messages, want) {
+		t.Errorf("notification diagnostics = %q, want %q", messages, want)
 	}
 }
 
