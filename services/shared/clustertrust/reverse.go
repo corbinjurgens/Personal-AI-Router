@@ -70,9 +70,14 @@ type ReverseTarget struct {
 
 type ReverseOptions struct {
 	LocalUUID string
-	// Callbacks must be bounded and must not call back into this manager.
+	// Validate and ResolveService must be bounded and must not call back into
+	// this manager.
 	Validate       func(ReversePeer) bool
 	ResolveService func(context.Context, ReversePeer, noderec.ServiceKey) (ReverseTarget, error)
+	// OnSessionEnd runs once per registered session as it closes, before its
+	// map entry is removed and without the manager mutex held. Has still sees
+	// a registered session during this callback. replaced means a duplicate won.
+	OnSessionEnd func(peer ReversePeer, uptime time.Duration, replaced bool)
 	// Stream limits count application streams in both directions. Each session
 	// also owns one control stream, bounded process-wide by MaxSessions.
 	PerSessionStreams int           // default 16
@@ -548,7 +553,16 @@ func (m *ReverseManager) Has(peer ReversePeer) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := m.sessions[peer.UUID]
-	if s == nil || s.peer != peer || !m.current(s) {
+	// A registered session remains present through its end callback so
+	// a supervisor cannot redial before that callback records the retry delay.
+	// Open still uses current, which refuses a closed transport immediately.
+	if s == nil || s.peer != peer || m.closed || !m.opts.Validate(peer) {
+		return false
+	}
+	if m.opts.OnSessionEnd != nil {
+		return true
+	}
+	if s.session.IsClosed() {
 		return false
 	}
 	select {
@@ -636,6 +650,9 @@ func (m *ReverseManager) accept(s *reverseSession) {
 		s.end("session ended")
 		s.cancel()
 		s.session.Close()
+		if m.opts.OnSessionEnd != nil {
+			m.opts.OnSessionEnd(s.peer, time.Since(s.started), s.reason() == "replaced by duplicate session")
+		}
 		m.mu.Lock()
 		if m.sessions[s.peer.UUID] == s {
 			delete(m.sessions, s.peer.UUID)

@@ -28,6 +28,73 @@ import (
 
 const reverseTestID = "11111111111111111111111111111111"
 
+func TestReverseSessionEndBeforeRemoval(t *testing.T) {
+	type ended struct {
+		peer              ReversePeer
+		up                time.Duration
+		replaced, present bool
+	}
+	ends := make(chan ended, 2)
+	var manager *ReverseManager
+	manager = reverseTestManager(t, ReverseOptions{LocalUUID: "a", OnSessionEnd: func(peer ReversePeer, up time.Duration, replaced bool) {
+		ends <- ended{peer, up, replaced, manager.Has(peer)}
+	}})
+	other := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	conn := reverseTestConnect(t, manager, other, "a", reverseTestID)
+	time.Sleep(5 * time.Millisecond)
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case end := <-ends:
+		if end.peer.UUID != "b" || end.replaced || !end.present || end.up < 5*time.Millisecond || end.up > time.Second {
+			t.Fatalf("session end = %+v", end)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing session end")
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case extra := <-ends:
+		t.Fatalf("extra end = %+v", extra)
+	default:
+	}
+}
+
+func TestReverseSessionEndDuplicate(t *testing.T) {
+	ends := make(chan bool, 3)
+	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a", OnSessionEnd: func(_ ReversePeer, _ time.Duration, replaced bool) { ends <- replaced }})
+	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	reverseTestConnect(t, a, b, "b", reverseTestID)
+	reverseTestConnect(t, a, b, "a", reverseTestID)
+	select {
+	case replaced := <-ends:
+		if !replaced {
+			t.Fatal("replaced session reported normal close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing replacement end")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case replaced := <-ends:
+		if replaced {
+			t.Fatal("winning session reported replacement")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing winner end")
+	}
+	select {
+	case extra := <-ends:
+		t.Fatalf("extra end = %v", extra)
+	default:
+	}
+}
+
 func reverseTestManager(t *testing.T, opts ReverseOptions) *ReverseManager {
 	t.Helper()
 	if opts.Validate == nil {
