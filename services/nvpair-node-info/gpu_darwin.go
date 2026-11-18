@@ -72,7 +72,15 @@ func readDarwinIORegistryWithRunner(
 }
 
 func staticGPUsFromIORegistry(data []byte, systemMemory uint64) ([]GPUInfo, error) {
-	records, err := parseIORegistryGPUs(data, systemMemory)
+	entries, err := decodeIORegistryEntries(data)
+	if err != nil {
+		return nil, err
+	}
+	return staticGPUsFromEntries(entries, systemMemory)
+}
+
+func staticGPUsFromEntries(entries []ioRegistryEntry, systemMemory uint64) ([]GPUInfo, error) {
+	records, err := gpuRecordsFromEntries(entries, systemMemory)
 	if err != nil {
 		return nil, err
 	}

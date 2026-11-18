@@ -271,7 +271,15 @@ func readDarwinGPUStats(ctx context.Context) (darwinGPUReading, error) {
 }
 
 func dynamicGPUReadingFromIORegistry(data []byte, systemMemory uint64) (darwinGPUReading, error) {
-	records, err := parseIORegistryGPUs(data, systemMemory)
+	entries, err := decodeIORegistryEntries(data)
+	if err != nil {
+		return darwinGPUReading{}, err
+	}
+	return dynamicGPUReadingFromEntries(entries, systemMemory)
+}
+
+func dynamicGPUReadingFromEntries(entries []ioRegistryEntry, systemMemory uint64) (darwinGPUReading, error) {
+	records, err := gpuRecordsFromEntries(entries, systemMemory)
 	if err != nil {
 		return darwinGPUReading{}, err
 	}
