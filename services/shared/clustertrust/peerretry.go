@@ -119,6 +119,13 @@ func (b *PeerBackoff) Reset(peer string) {
 	delete(b.entries, peer)
 }
 
+// ResetAll forgets every peer's retry history, making all peers due.
+func (b *PeerBackoff) ResetAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clear(b.entries)
+}
+
 // Expedite makes a known peer due now without erasing its failure history.
 func (b *PeerBackoff) Expedite(peer string) {
 	b.mu.Lock()
@@ -139,14 +146,27 @@ func (b *PeerBackoff) Retain(keep map[string]bool) {
 	}
 }
 
-type PeerStreamLoop struct{ Retry *PeerRetry }
+type PeerStreamLoop struct {
+	Retry   *PeerRetry
+	Changed func() <-chan struct{}
+}
 
 // KeepPeerStream retries until the context ends or attempt reports keep=false.
 func KeepPeerStream(ctx context.Context, loop PeerStreamLoop, attempt func(context.Context) (up time.Duration, keep bool)) {
 	for ctx.Err() == nil {
+		var changed <-chan struct{}
+		if loop.Changed != nil {
+			changed = loop.Changed()
+		}
 		up, keep := attempt(ctx)
 		if !keep || ctx.Err() != nil {
 			return
+		}
+		select {
+		case <-changed:
+			loop.Retry.Reset()
+			continue
+		default:
 		}
 		timer := time.NewTimer(loop.Retry.Next(up, time.Now()))
 		select {
@@ -154,6 +174,14 @@ func KeepPeerStream(ctx context.Context, loop PeerStreamLoop, attempt func(conte
 			timer.Stop()
 			return
 		case <-timer.C:
+			select {
+			case <-changed:
+				loop.Retry.Reset()
+			default:
+			}
+		case <-changed:
+			timer.Stop()
+			loop.Retry.Reset()
 		}
 	}
 }

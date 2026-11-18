@@ -5,9 +5,93 @@ package clustertrust
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
+
+type testChanges struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (s *testChanges) Changed() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ch == nil {
+		s.ch = make(chan struct{})
+	}
+	return s.ch
+}
+
+func (s *testChanges) notify() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ch != nil {
+		close(s.ch)
+	}
+	s.ch = make(chan struct{})
+}
+
+func TestKeepPeerStreamChange(t *testing.T) {
+	for _, duringAttempt := range []bool{false, true} {
+		name := "during wait"
+		if duringAttempt {
+			name = "during attempt"
+		}
+		t.Run(name, func(t *testing.T) {
+			var changes testChanges
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			attempted := make(chan struct{})
+			done := make(chan struct{})
+			r := &PeerRetry{Initial: time.Hour, Cap: time.Hour, StableAfter: time.Second}
+			go func() {
+				defer close(done)
+				n := 0
+				KeepPeerStream(ctx, PeerStreamLoop{Retry: r, Changed: changes.Changed}, func(ctx context.Context) (time.Duration, bool) {
+					n++
+					if n == 2 {
+						return 0, false
+					}
+					ch := changes.Changed()
+					close(attempted)
+					if duringAttempt {
+						select {
+						case <-ch:
+						case <-ctx.Done():
+						}
+					}
+					return 0, true
+				})
+			}()
+			<-attempted
+			if !duringAttempt {
+				time.Sleep(20 * time.Millisecond)
+			}
+			changes.notify()
+			select {
+			case <-done:
+			case <-time.After(200 * time.Millisecond):
+				t.Fatal("change did not expedite attempt")
+			}
+		})
+	}
+}
+
+func TestPeerBackoffResetAll(t *testing.T) {
+	b := NewPeerBackoff()
+	now := time.Now()
+	for _, peer := range []string{"a", "b"} {
+		b.Ended(peer, nil, 0, now)
+	}
+	b.ResetAll()
+	for _, peer := range []string{"a", "b"} {
+		if !b.Due(peer, nil, now) {
+			t.Fatalf("%s not due", peer)
+		}
+	}
+}
 
 func constantRetry() *PeerRetry {
 	r := NewMemberRetry()

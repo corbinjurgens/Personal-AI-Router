@@ -460,6 +460,86 @@ func TestReadSnapshotStream(t *testing.T) {
 	})
 }
 
+func TestSnapshotStreamWallIdleOnChange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		age   time.Duration
+		lines bool
+		idle  bool
+	}{
+		{"sleep gap", 5 * time.Second, false, true},
+		{"recent line", 500 * time.Millisecond, false, false},
+		{"flowing lines", 0, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var clock atomic.Int64
+			clock.Store(time.Now().UnixNano())
+			oldNow := streamWallNow
+			streamWallNow = func() time.Time { return time.Unix(0, clock.Load()) }
+			defer func() { streamWallNow = oldNow }()
+			var changes testChanges
+			ready := make(chan struct{}, 8)
+			ctx, cancel, response := openStream(t, func(w http.ResponseWriter, r *http.Request) {
+				_ = http.NewResponseController(w).Flush()
+				if !tc.lines {
+					<-r.Context().Done()
+					return
+				}
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-ticker.C:
+						if _, err := fmt.Fprintln(w, "null"); err != nil {
+							return
+						}
+						if err := http.NewResponseController(w).Flush(); err != nil {
+							return
+						}
+					}
+				}
+			})
+			defer cancel()
+			result := make(chan StreamOutcome, 1)
+			go func() {
+				out, _ := ReadSnapshotStream(ctx, cancel, response.Body, SnapshotStreamClient[streamFrame]{
+					Idle: time.Second, MaxLine: 4096, Current: func() bool { return true },
+					Changed:     func() <-chan struct{} { ch := changes.Changed(); ready <- struct{}{}; return ch },
+					OnKeepalive: func() { ready <- struct{}{} },
+				})
+				result <- out
+			}()
+			<-ready
+			if tc.lines {
+				<-ready
+			}
+			clock.Add(int64(tc.age))
+			changes.notify()
+			<-ready // watcher captured next generation
+			if tc.idle {
+				select {
+				case out := <-result:
+					if out.End != StreamEndIdle {
+						t.Fatalf("end = %s", out.End)
+					}
+				case <-time.After(200 * time.Millisecond):
+					t.Fatal("wake did not end idle stream")
+				}
+			} else {
+				select {
+				case out := <-result:
+					t.Fatalf("healthy stream ended: %+v", out)
+				case <-time.After(200 * time.Millisecond):
+				}
+				cancel()
+				<-result
+			}
+		})
+	}
+}
+
 func TestSnapshotStreamOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name                string

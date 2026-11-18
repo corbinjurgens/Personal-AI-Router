@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -71,6 +72,7 @@ func ServeSnapshotStream[T any](w http.ResponseWriter, r *http.Request, s Snapsh
 
 // SnapshotStreamClient configures ReadSnapshotStream.
 type SnapshotStreamClient[T any] struct {
+	Changed     func() <-chan struct{}  // optional address-change/wake source
 	Idle        time.Duration           // cancel when no line (keepalives included) arrives within Idle; required
 	Recheck     time.Duration           // also call Current on this interval; 0 = before every line only
 	MaxLine     int                     // maximum line length in bytes; required
@@ -79,6 +81,8 @@ type SnapshotStreamClient[T any] struct {
 	OnFrame     func(T) error           // called for every decoded line; an error ends the stream
 	OnKeepalive func()                  // optional; called for every null line
 }
+
+var streamWallNow = func() time.Time { return time.Now().Round(0) }
 
 // StreamOutcome describes the accepted portion of one snapshot stream.
 type StreamOutcome struct {
@@ -123,6 +127,30 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 		defer mu.Unlock()
 		return reason != ""
 	}
+	now := streamWallNow
+	var lastLine atomic.Int64
+	if c.Changed != nil {
+		lastLine.Store(now().UnixNano())
+		changed := c.Changed()
+		watchDone := make(chan struct{})
+		defer close(watchDone)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-watchDone:
+					return
+				case <-changed:
+					changed = c.Changed()
+					if now().Sub(time.Unix(0, lastLine.Load())) >= c.Idle {
+						stop(StreamEndIdle)
+						return
+					}
+				}
+			}
+		}()
+	}
 	var first, last time.Time
 	defer func() {
 		mu.Lock()
@@ -159,6 +187,9 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), c.MaxLine)
 	for scanner.Scan() {
+		if c.Changed != nil {
+			lastLine.Store(now().UnixNano())
+		}
 		if stopped() || ctx.Err() != nil {
 			return outcome, context.Canceled
 		}
