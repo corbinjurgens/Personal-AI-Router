@@ -27,6 +27,8 @@ const performanceStreamPath = "/v1/workloads/performance/events"
 // performanceStreamKeepalive is a variable so tests can shorten it.
 var performanceStreamKeepalive = 10 * time.Second
 
+var newPerformanceStreamRetry = clustertrust.NewStreamRetry
+
 const (
 	performanceStreamWriteTimeout = 5 * time.Second
 	// performanceStreamIdle drops a subscriber stream that sent no line,
@@ -35,8 +37,6 @@ const (
 	// performanceStreamConnect bounds connect and response headers only; the
 	// stream itself has no total timeout.
 	performanceStreamConnect = 10 * time.Second
-	// performanceStreamBackoffMax caps the reconnect delay, which starts at 1 s.
-	performanceStreamBackoffMax = 30 * time.Second
 	// performanceStatusRefresh is how often keepalives re-assert "fresh" to
 	// the broker, the cadence the former 30 s heartbeat gave it.
 	performanceStatusRefresh = 30 * time.Second
@@ -220,29 +220,18 @@ func (p *performanceRelay) syncStreams(ctx context.Context, active map[string]co
 	}
 }
 
-// keepStream reads uuid's stream until ctx ends, reconnecting after 1 s,
-// doubling to performanceStreamBackoffMax while attempts fail or end on a
-// refused frame.
+// keepStream reads uuid's stream using the shared peer reconnect schedule.
 func (p *performanceRelay) keepStream(ctx context.Context, uuid string) {
-	backoff := time.Second
-	for ctx.Err() == nil {
-		if p.consumeStream(ctx, uuid) {
-			backoff = time.Second
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-		backoff = min(2*backoff, performanceStreamBackoffMax)
-	}
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPerformanceStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
+		return p.consumeStream(ctx, uuid), true
+	})
 }
 
 // consumeStream opens and reads one performance stream from uuid and reports
-// whether it was healthy: at least one line arrived and it did not end on a
-// refused or undecodable frame. The stream is bound to the peer's admission
+// its healthy duration, or zero after a refused, undecodable or failed stream.
+// The stream is bound to the peer's admission
 // identity and route generation at connect: either changing ends it.
-func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bool {
+func (p *performanceRelay) consumeStream(parent context.Context, uuid string) time.Duration {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	b := p.broadcaster
@@ -250,7 +239,7 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bo
 	identity, admitted := b.mesh.PeerServiceIncarnation(uuid)
 	t, generation, routed := b.peers.targetUUID(uuid)
 	if !admitted || !routed || t.id != uuid {
-		return false
+		return 0
 	}
 	current := func() bool {
 		b.mesh.Refresh()
@@ -260,28 +249,27 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bo
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+b.addrs.Prefer(t.id, t.candidates)+performanceStreamPath, nil)
 	if err != nil {
-		return false
+		return 0
 	}
 	connect := time.AfterFunc(performanceStreamConnect, cancel)
 	resp, err := p.streams.Client(uuid, noderec.ServiceWorkload).Do(req)
 	connect.Stop()
 	if err != nil {
 		b.addrs.Forget(t.id)
-		return false
+		return 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return 0
 	}
 	authority := p.streamAuthority(uuid, identity, current)
-	received, accepted := false, false
-	_, err = clustertrust.ReadSnapshotStream(ctx, cancel, resp.Body, clustertrust.SnapshotStreamClient[performanceFrame]{
+	accepted := false
+	outcome, err := clustertrust.ReadSnapshotStream(ctx, cancel, resp.Body, clustertrust.SnapshotStreamClient[performanceFrame]{
 		Idle:    performanceStreamIdle,
 		MaxLine: performanceStreamMaxLine,
 		Current: current,
 		Decode:  decodePerformanceFrame,
 		OnFrame: func(frame performanceFrame) error {
-			received = true
 			code, message := p.applySummary(authority, frame.Summary, frame.ElapsedMs)
 			if code != http.StatusOK {
 				// The reconnect starts with the full summary again, which is
@@ -294,17 +282,17 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bo
 			return nil
 		},
 		OnKeepalive: func() {
-			received = true
 			if accepted {
 				p.refreshReceipt(uuid, authority)
 			}
 		},
 	})
-	if err != nil && !errors.Is(err, context.Canceled) {
+	switch outcome.End {
+	case clustertrust.StreamEndRefused, clustertrust.StreamEndDecode, clustertrust.StreamEndError:
 		slog.Debug("performance stream ended", "nodeId", uuid, "err", err)
-		return false
+		return 0
 	}
-	return received
+	return outcome.Healthy
 }
 
 // streamAuthority is applySummary's authority for a stream from uuid: the

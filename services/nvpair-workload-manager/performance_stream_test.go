@@ -362,23 +362,24 @@ func TestPerformanceStreamOlderRevisionDoesNotRefresh(t *testing.T) {
 	}
 }
 
-// consumeStream reports a healthy stream only when it delivered lines and did
-// not end on a refused or oversized frame, so refusals keep backing off.
+// Only accepted frames contribute healthy time; error endings discard it.
 func TestPerformanceStreamHealthDrivesBackoff(t *testing.T) {
 	test := func(name string, want bool, lines ...string) {
 		t.Run(name, func(t *testing.T) {
 			f := newPerformanceFixture(t)
 			performanceStreamServe(t, f, performanceLinesThen(false, lines...))
 			performanceAddPeer(f.manager)
-			if got := f.manager.performance.consumeStream(context.Background(), "uuid-peer"); got != want {
+			if got := f.manager.performance.consumeStream(context.Background(), "uuid-peer"); (got > 0) != want {
 				t.Fatalf("healthy = %v, want %v", got, want)
 			}
 		})
 	}
 	test("accepted then closed", true, performanceLine(t, performanceSummary("uuid-peer", 1), 0), "null")
-	test("keepalive only", true, "null")
+	test("keepalive only", false, "null")
 	test("refused frame", false, performanceLine(t, performanceSummary("uuid-third-party", 1), 0))
 	test("malformed frame", false, `{"summary":{},"elapsedMs":-1}`)
+	test("accepted then refused", false, performanceLine(t, performanceSummary("uuid-peer", 1), 0), "null", performanceLine(t, performanceSummary("uuid-third-party", 2), 0))
+	test("accepted then malformed", false, performanceLine(t, performanceSummary("uuid-peer", 1), 0), "null", `{"summary":{},"elapsedMs":-1}`)
 	test("over line limit", false, `{"summary":"`+strings.Repeat("x", performanceStreamMaxLine)+`","elapsedMs":0}`)
 	test("no line", false)
 }
