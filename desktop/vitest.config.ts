@@ -4,6 +4,11 @@
 import { defineConfig } from 'vitest/config'
 import * as path from 'path'
 
+// Let jsdom own browser storage rather than Node's experimental webstorage.
+process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--no-experimental-webstorage']
+    .filter(Boolean)
+    .join(' ')
+
 /**
  * Two projects:
  *
