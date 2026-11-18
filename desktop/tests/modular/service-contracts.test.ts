@@ -102,6 +102,52 @@ func handle(method string) {
         ])
     })
 
+    it('resolves only untyped or string method constants and treats notifyNode as a notification site', async () => {
+        const dir = await fixture({
+            'component/go.mod': 'module example.test/component\n',
+            'component/methods.go': `package main
+const (
+    NodeUpdated = "node:updated"
+    EndError    StreamEnd = "error"
+)
+const NodeRemoved string = "node:removed"
+`,
+            'component/main.go': `package main
+func (d *daemon) notifyNode(method string, node Node) error {
+    return d.codec.Notify(method, node)
+}
+func run(method string) {
+    d.notifyNode("node:discovered", node)
+    nodeErr = d.notifyNode(NodeUpdated, node)
+    d.notifyNode(method, node)
+    d.notifyNodeInfoOutage(node, endpoint, ok)
+}
+func end(reason StreamEnd) {
+    switch reason {
+    case EndError:
+    }
+    notify(NodeRemoved, nil)
+}
+func outage(reportable bool) {
+    method := "errors:clear"
+    if reportable {
+        method = "errors:report"
+    }
+    d.codec.Notify(method, nil)
+}
+`
+        })
+
+        const surface = extractSurface(dir)
+        expect([...surface.handles]).toEqual([])
+        expect([...surface.emits].sort()).toEqual(['node:discovered', 'node:removed', 'node:updated'])
+        expect(surface.dynamic).toEqual([
+            { label: 'method (var)', file: 'main.go', line: 3 },
+            { label: 'method (var)', file: 'main.go', line: 8 },
+            { label: 'method (var)', file: 'main.go', line: 22 }
+        ])
+    })
+
     it('resolves imported constants through local replacements and file-specific aliases', async () => {
         const dir = await fixture({
             'component/go.mod': `module example.test/component

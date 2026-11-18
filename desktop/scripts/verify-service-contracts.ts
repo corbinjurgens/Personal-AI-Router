@@ -120,14 +120,24 @@ function listGoFiles(dir: string): string[] {
     return out
 }
 
+// Only untyped or string const declarations name methods. A local
+// `method = "x:y"` assignment must not resolve every `method` argument in the
+// package to "x:y", and a typed enum such as `StreamEndError StreamEnd = "error"`
+// is not a method.
+const CONST_SINGLE_RE = /^\s*const\s+([A-Za-z_]\w*)(?:\s+string)?\s*=\s*"([^"]+)"/gm
+const CONST_BLOCK_RE = /^\s*const\s*\(([\s\S]*?)^\s*\)/gm
+const CONST_SPEC_RE = /^\s*([A-Za-z_]\w*)(?:\s+string)?\s*=\s*"([^"]+)"/gm
+
 function buildConstMap(files: string[]): Map<string, string> {
     const map = new Map<string, string>()
-    const re = /\b([A-Za-z_]\w*)\s*=\s*"([^"]+)"/g
+    const add = (name: string, value: string): void => {
+        if (isMethodish(value)) map.set(name, value)
+    }
     for (const file of files) {
         const text = readFileSync(file, 'utf8')
-        for (const m of text.matchAll(re)) {
-            const value = m[2]
-            if (isMethodish(value)) map.set(m[1], value)
+        for (const m of text.matchAll(CONST_SINGLE_RE)) add(m[1], m[2])
+        for (const block of text.matchAll(CONST_BLOCK_RE)) {
+            for (const m of block[1].matchAll(CONST_SPEC_RE)) add(m[1], m[2])
         }
     }
     return map
@@ -162,15 +172,17 @@ const QUOTED_RE = /"([^"]+)"/g
 const IDENT_RE = /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b/g
 // NotifyContext takes ctx before method; keep the method in capture group 1
 // for both bare and receiver-qualified calls, just like Notify.
+// notifyNode(method, node) is nvpair-node-scanner's node-event helper; its
+// first argument is the JSON-RPC method, as with Notify.
 const NOTIFY_LITERAL_RE =
-    /(?:(?:notify|emit|publish|broadcast)\(|notifyContext\([^,]*,)\s*"([^"]+)"/gi
+    /(?:(?:notify|notifyNode|emit|publish|broadcast)\(|notifyContext\([^,]*,)\s*"([^"]+)"/gi
 const NOTIFY_PREFIX_CONCAT_RE =
-    /(?:(?:notify|emit|publish|broadcast)\(|notifyContext\([^,]*,)\s*"([^"]+)"\s*\+/i
+    /(?:(?:notify|notifyNode|emit|publish|broadcast)\(|notifyContext\([^,]*,)\s*"([^"]+)"\s*\+/i
 // Broadcast(ctx, frame) is HTTP fan-out, not a JSON-RPC notification. Keep
 // literal Broadcast methods above, but do not treat an identifier argument to
 // Broadcast as an unresolved JSON-RPC method.
 const NOTIFY_IDENT_RE =
-    /(?:(?:notify|emit|publish)\(|notifyContext\([^,]*,)\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*,/gi
+    /(?:(?:notify|notifyNode|emit|publish)\(|notifyContext\([^,]*,)\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*,/gi
 
 /** A `| `nvpair-ui-broker` | 0.37.0 | … |` row — forbidden in hand-maintained docs. */
 const DOC_COMPONENT_ROW_RE = /^\|\s*`([a-z0-9-]+)`\s*\|\s*(\d+\.\d+\.\d+)\s*\|/gm
