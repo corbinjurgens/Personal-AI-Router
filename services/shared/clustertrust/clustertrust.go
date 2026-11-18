@@ -82,9 +82,17 @@ type Trust struct {
 	// that holds the pin, and a consumer that gated a peer once on a
 	// trust-changed signal would drop it with nothing to re-gate it.
 	reload sync.Mutex
+	pins   map[string]cachedTrustPin // guarded by reload
 	mu     sync.RWMutex
 	ders   map[string][]byte
 }
+
+type cachedTrustPin struct {
+	data []byte
+	der  []byte
+}
+
+var parseTrustPinDER = pinDER
 
 // newTrust opens clusterDir/trusted. The pins are read by the owning Mesh's
 // first Refresh, not here, so there is one place that decides when the cluster
@@ -118,6 +126,7 @@ func (t *Trust) Reload() {
 	// A missing dir leaves entries nil, so the loop below is a no-op and the
 	// empty set is published — the authoritative "no peers trusted".
 	ders := make(map[string][]byte, len(entries))
+	pins := make(map[string]cachedTrustPin, len(entries))
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
@@ -134,6 +143,14 @@ func (t *Trust) Reload() {
 			if previous, ok := t.DER(fileUUID); ok {
 				ders[fileUUID] = previous
 			}
+			if cached, ok := t.pins[name]; ok {
+				pins[name] = cached
+			}
+			continue
+		}
+		if cached, ok := t.pins[name]; ok && bytes.Equal(data, cached.data) {
+			ders[fileUUID] = cached.der
+			pins[name] = cached
 			continue
 		}
 		var pin struct {
@@ -147,12 +164,14 @@ func (t *Trust) Reload() {
 		if err := json.Unmarshal(data, &pin); err != nil {
 			continue
 		}
-		der, err := pinDER(pin.NodeUUID, pin.CertPem, fileUUID)
+		der, err := parseTrustPinDER(pin.NodeUUID, pin.CertPem, fileUUID)
 		if err != nil {
 			continue
 		}
 		ders[fileUUID] = der
+		pins[name] = cachedTrustPin{data: data, der: der}
 	}
+	t.pins = pins
 	t.mu.Lock()
 	t.ders = ders
 	t.mu.Unlock()
