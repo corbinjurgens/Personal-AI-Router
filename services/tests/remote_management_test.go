@@ -1113,6 +1113,23 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 			}
 		}
 		before := decodeServicePolicy(t, c.mustCall(t, "706", "policy:get", nil))
+		task1Eventually(t, "restarted engine manager receives current policy projection", 10*time.Second, func() bool {
+			var inventory struct {
+				Policy *nodepolicy.Advertisement `json:"policy"`
+			}
+			message, err := c.call("709", "engine:models", nil, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if message.Error != nil {
+				if message.Error.Code == -32000 && message.Error.Message == "engine-manager not available" {
+					return false
+				}
+				t.Fatalf("engine:models RPC error: %+v", message.Error)
+			}
+			task2Decode(t, message.Result, &inventory)
+			return inventory.Policy != nil && inventory.Policy.Revision == before.Revision
+		})
 		assertStoredPolicy(t, f.policyPath(), before)
 		beforeBytes := readPolicyBytes(t, f.policyPath())
 		draft := before.PeerProjection()
