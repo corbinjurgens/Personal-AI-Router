@@ -293,7 +293,6 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		tombstones:    make(map[string]Tombstone),
 		removalProofs: make(map[string]RemovalProof),
 		sessions:      make(map[string]*pairingSession),
-		peerAddrs:     reach.NewChooser(),
 		joinRequests:  make(map[string]*joinRequestRecord),
 		joinSources:   make(map[string]*joinRequestSource),
 		joinHandlers:  make(chan struct{}, 8),
@@ -307,6 +306,7 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		reverseBackoff:    clustertrust.NewPeerBackoff(),
 		peerStateBackoff:  newPeerStateBackoff(),
 	}
+	mgr.peerAddrs = reach.NewChooser(reach.WithVerify(mgr.mesh.VerifyPeerAddress), reach.WithChanged(mgr.peerChanges))
 	mgr.initSelfName(storedIdentity)
 	log.Printf("node identity %s name %s fingerprint %s", identity.NodeUUID, mgr.selfName(), identity.CertFingerprint)
 	mgr.peerRoutes = make(map[string]clusterPeerRoute)

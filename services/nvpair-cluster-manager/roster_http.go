@@ -248,7 +248,7 @@ func (m *Manager) reconcileWithin(ctx context.Context, addrs []string, peerUUID 
 		}
 		// Nothing answered at this address, so the remembered choice is stale;
 		// the next pass re-confirms rather than starting here again.
-		m.peerAddrs.Forget(peerUUID)
+		m.peerAddrs.ForgetAddr(peerUUID, addr)
 		if ctx.Err() != nil {
 			log.Printf("roster: reconcile with %s spent its address budget; the remaining addresses wait for the next pass",
 				peerUUID)

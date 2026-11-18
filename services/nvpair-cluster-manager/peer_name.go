@@ -148,7 +148,7 @@ func (m *Manager) handleSetPeerName(msg *Message) {
 			m.answerPeerRename(msg, uuid, status, answer)
 			return
 		}
-		m.peerAddrs.Forget(uuid)
+		m.peerAddrs.ForgetAddr(uuid, addr)
 		if ctx.Err() != nil {
 			break
 		}

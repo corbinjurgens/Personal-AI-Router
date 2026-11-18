@@ -453,7 +453,7 @@ func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation stri
 			if parentErr := ctx.Err(); parentErr != nil {
 				return read, parentErr
 			}
-			m.peerAddrs.Forget(uuid)
+			m.peerAddrs.ForgetAddr(uuid, address)
 			continue
 		}
 		switch response.StatusCode {
@@ -469,7 +469,7 @@ func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation stri
 		default:
 			response.Body.Close()
 			cancel()
-			m.peerAddrs.Forget(uuid)
+			m.peerAddrs.ForgetAddr(uuid, address)
 			continue
 		}
 		read, err := m.readPeerStateStream(streamCtx, cancel, response.Body, uuid, incarnation, peer)

@@ -27,9 +27,11 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
+	"nvpair-shared/reach"
 )
 
-const reverseSetupTimeout = 5 * time.Second
+var reverseSetupTimeout = 5 * time.Second
+
 const reverseMaxPrivateConnections = 256
 const reverseMaxPrivateCalls = 128
 
@@ -524,12 +526,23 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 		return err
 	}
 	var failures []string
-	for _, addr := range m.resolvePeerAddrs(node) {
+	addrs := m.resolvePeerAddrs(node)
+	chooseCtx, chooseCancel := context.WithTimeout(ctx, reach.DefaultTimeout+time.Second)
+	chosen := m.peerAddrs.ChooseWithin(chooseCtx, peer.UUID, addrs)
+	chooseCancel()
+	reportFailure := func(addr string) {
+		if addr == chosen {
+			m.peerAddrs.ForgetAddr(peer.UUID, addr)
+			chosen = ""
+		}
+	}
+	for _, addr := range confirmedFirst(addrs, chosen) {
 		setup, cancel := context.WithTimeout(ctx, reverseSetupTimeout)
 		conn, err := (&net.Dialer{}).DialContext(setup, "tcp", addr)
 		if err != nil {
 			cancel()
 			failures = append(failures, reverseAttemptFailure(addr, "dial", err))
+			reportFailure(addr)
 			continue
 		}
 		stop := context.AfterFunc(setup, func() { conn.Close() })
@@ -578,6 +591,7 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 			stage, err = "setup", errors.New("setup budget expired")
 		}
 		failures = append(failures, reverseAttemptFailure(addr, stage, err))
+		reportFailure(addr)
 	}
 	if len(failures) == 0 {
 		return errors.New("peer has no known address")

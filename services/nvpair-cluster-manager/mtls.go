@@ -163,7 +163,7 @@ func (m *Manager) notifyPeerRemoval(ctx context.Context, addr, peerUUID string, 
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			m.peerAddrs.Forget(peerUUID)
+			m.peerAddrs.ForgetAddr(peerUUID, addr)
 		}
 	}()
 	if !m.selectPeerServiceAddress(peerUUID, addr) {

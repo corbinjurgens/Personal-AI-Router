@@ -27,8 +27,95 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/ipc"
 	"nvpair-shared/noderec"
+	"nvpair-shared/reach"
 	"nvpair-shared/splitlisten"
 )
+
+// reverseRouteFixture gives the raw walk a silent recorded endpoint and a
+// fixture-owned working discovery endpoint. The chooser's dial describes a
+// blackholed SYN independently of the listener used to catch a wrong ordering.
+func reverseRouteFixture(t *testing.T, warm bool) (*Manager, ClusterNode, string, string) {
+	t.Helper()
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	startReverseHTTP(t, b, false)
+	pairReverseManagers(t, a, b)
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sockets sync.WaitGroup
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			sockets.Go(func() { defer conn.Close(); _, _ = io.Copy(io.Discard, conn) })
+		}
+	}()
+	t.Cleanup(func() { silent.Close(); <-stopped; sockets.Wait() })
+	node, ok := a.memberByUUID(b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("peer missing")
+	}
+	node = cloneClusterNode(node)
+	node.Port = silent.Addr().(*net.TCPAddr).Port
+	a.browser = newBrowser()
+	a.browser.seed(b.identity.NodeUUID, "127.0.0.1", b.port)
+	stale := silent.Addr().String()
+	working := net.JoinHostPort("127.0.0.1", strconv.Itoa(b.port))
+	var initial atomic.Bool
+	initial.Store(warm)
+	a.peerAddrs = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
+		if address == stale && !initial.Load() {
+			time.Sleep(timeout)
+			return nil, errors.New("blackholed SYN")
+		}
+		return net.DialTimeout(network, address, timeout)
+	}))
+	if warm {
+		if got := a.peerAddrs.ChooseWithin(context.Background(), node.NodeUUID, []string{stale, working}); got != stale {
+			t.Fatalf("warm choice = %q", got)
+		}
+	}
+	return a, *node, stale, working
+}
+
+func TestReverseColdWalkUsesConfirmedOrder(t *testing.T) {
+	a, node, _, _ := reverseRouteFixture(t, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := a.dialReverseSession(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed >= 2*time.Second {
+		t.Fatalf("cold setup took %v, want under 2s", elapsed)
+	}
+}
+
+func TestReverseWarmWalkPaysSetupBudgetAndRetiresFailedAddress(t *testing.T) {
+	oldTimeout := reverseSetupTimeout
+	reverseSetupTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { reverseSetupTimeout = oldTimeout })
+	a, node, stale, working := reverseRouteFixture(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := a.dialReverseSession(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < reverseSetupTimeout {
+		t.Fatalf("warm setup took %v, want at least the stale setup budget", elapsed)
+	}
+	// Both still accept TCP. Only the address-specific setup failure report can
+	// put the silent TLS endpoint behind the working endpoint on this new walk.
+	if got := a.peerAddrs.ChooseWithin(ctx, node.NodeUUID, []string{stale, working}); got != working {
+		t.Fatalf("choice after setup failure = %q, want %q", got, working)
+	}
+}
 
 type reverseProvenanceTestConn struct {
 	net.Conn

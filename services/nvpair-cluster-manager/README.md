@@ -699,6 +699,19 @@ scanner's self identity/addresses and current broker service registrations;
 neither roster entries nor reverse sessions establish service presence.
 The pinned direct/reverse client retains its normal transport policy.
 
+Reverse-session setup tries the chooser's TCP-confirmed address first, followed
+by the remaining resolved addresses. A cold confirmation is bounded by 2 s and
+probes candidates together; an unconfirmed silent address therefore does not
+consume the 5 s setup budget ahead of a working address. A previously confirmed
+address that later goes silent still consumes its setup budget before failover.
+Setup failures mark that specific chosen address suspect for 10 minutes, with
+suspect addresses tried last. A session registration refusal does not do this.
+
+While new connections use a lower-class address, the chooser can check a
+better-class published address in the background, after a network change or
+every 10 minutes while the peer is being dialled. Only a successful pinned mTLS
+handshake permits the return. Existing streams and sessions stay open.
+
 One process network monitor detects address changes and wall-clock sleep gaps
 over 15 s. A notification resets peer retry schedules, makes direct routes
 eligible again, and probes reverse sessions concurrently, closing only sessions
