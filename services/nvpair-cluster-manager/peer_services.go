@@ -201,6 +201,7 @@ type peerStateResult struct {
 	gotFrame    bool
 	forbidden   bool
 	outcome     clustertrust.StreamOutcome
+	changed     <-chan struct{}
 }
 
 type peerStateRead struct {
@@ -297,6 +298,7 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 				continue
 			}
 			streamCtx, cancel := context.WithCancel(ctx)
+			changed := m.peerChanges()
 			active[uuid] = peerStateStream{cancel: cancel, incarnation: incarnation}
 			work.Add(1)
 			go func() {
@@ -304,7 +306,7 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 				read, err := m.runPeerStateStream(streamCtx, uuid, incarnation)
 				cancel()
 				result := peerStateResult{uuid: uuid, incarnation: incarnation, addrs: addrs, gotFrame: read.gotFrame,
-					forbidden: errors.Is(err, errPeerStateForbidden), outcome: read.outcome}
+					forbidden: errors.Is(err, errPeerStateForbidden), outcome: read.outcome, changed: changed}
 				select {
 				case done <- result:
 				case <-ctx.Done():
@@ -367,7 +369,13 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 			if stream.stopped {
 				continue
 			}
-			m.peerStateBackoff.Ended(result.uuid, result.addrs, result.outcome.Healthy, time.Now())
+			select {
+			case <-result.changed:
+				m.peerStateBackoff.Reset(result.uuid)
+				start()
+			default:
+				m.peerStateBackoff.Ended(result.uuid, result.addrs, result.outcome.Healthy, time.Now())
+			}
 		case <-evaluateTicker.C:
 			evaluate()
 		case <-m.peerStateMembers:
@@ -480,6 +488,7 @@ func (m *Manager) readPeerStateStream(ctx context.Context, cancel context.Cancel
 	var rosterHash string
 	gotFrame := false
 	outcome, err := clustertrust.ReadSnapshotStream(ctx, cancel, body, clustertrust.SnapshotStreamClient[noderec.PeerStateFrame]{
+		Changed: m.changed,
 		Idle:    peerStateIdle,
 		MaxLine: noderec.PeerStateMaxLine,
 		Current: func() bool {

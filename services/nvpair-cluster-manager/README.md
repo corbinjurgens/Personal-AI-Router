@@ -699,6 +699,13 @@ scanner's self identity/addresses and current broker service registrations;
 neither roster entries nor reverse sessions establish service presence.
 The pinned direct/reverse client retains its normal transport policy.
 
+One process network monitor detects address changes and wall-clock sleep gaps
+over 15 s. A notification resets peer retry schedules, makes direct routes
+eligible again, and probes reverse sessions concurrently, closing only sessions
+whose ping fails. A peer-state stream reopens when its last line is at least its
+25 s idle limit old by wall time; a recently active stream stays open. Changes
+to a route or link that preserve every address are not detected.
+
 The descriptor keeps the scanner's canonical address first and appends missing,
 sorted IPv4 overlay hints from `netpick.SharedOverlayAddresses`. Its public
 address cap remains four: a full scanner list gives its last position to the

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/netmon"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
 )
@@ -59,6 +61,7 @@ type Manager struct {
 	peerStateStreams     *clustertrust.PeerServiceClient // no total timeout; streams only
 	reverseBackoff       *clustertrust.PeerBackoff
 	peerStateBackoff     *clustertrust.PeerBackoff
+	changed              func() <-chan struct{}
 	peerRoutesMu         sync.Mutex
 	peerRoutes           map[string]clusterPeerRoute
 	serviceRefresh       peerServicesState
@@ -412,6 +415,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.cancel = cancel
 	m.joinContext = ctx
 	defer cancel()
+	m.startNetworkWatch(ctx)
 	defer m.peerServices.CloseIdle()
 	defer m.removalPeerServices.CloseIdle()
 	if m.controlTransport != nil {
@@ -437,6 +441,10 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.startResolver()
 	m.reverse.wg.Add(1)
 	go m.reverseConnectLoop(ctx)
+	if m.changed != nil {
+		m.reverse.wg.Add(1)
+		go func() { defer m.reverse.wg.Done(); m.networkChangeLoop(ctx) }()
+	}
 	go m.peerStateLoop(ctx)
 
 	// Subscribe to the broker's discovery relay for cl peer targets. They arrive
@@ -457,6 +465,59 @@ func (m *Manager) Run(ctx context.Context) error {
 	err := m.readLoop(ctx)
 	m.clients.CloseIdle()
 	return err
+}
+
+var startNetworkMonitor = func(ctx context.Context) (func() <-chan struct{}, error) {
+	mon, err := netmon.Watch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return mon.Changed, nil
+}
+
+var probeReverseSessions = (*clustertrust.ReverseManager).Probe
+
+func (m *Manager) startNetworkWatch(ctx context.Context) {
+	changed, err := startNetworkMonitor(ctx)
+	if err != nil {
+		slog.Warn("network monitor unavailable", "err", err)
+		return
+	}
+	m.changed = changed
+}
+
+// peerChanges also serves clients constructed before Run starts the monitor.
+func (m *Manager) peerChanges() <-chan struct{} {
+	if m.changed == nil {
+		return nil
+	}
+	return m.changed()
+}
+
+func (m *Manager) networkChangeLoop(ctx context.Context) {
+	ch := m.changed()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			ch = m.changed()
+			m.reverseBackoff.ResetAll()
+			m.peerStateBackoff.ResetAll()
+			select {
+			case m.peerReachableWake <- struct{}{}:
+			default:
+			}
+			n := 0
+			for _, node := range m.snapshotNodes() {
+				if peer, ok := m.reversePeer(node.NodeUUID); ok && m.reverse.manager.Has(peer) {
+					n++
+				}
+			}
+			closed := probeReverseSessions(m.reverse.manager)
+			slog.Info("network change or wake", "probed", n, "closed", closed)
+		}
+	}
 }
 
 // startResolver sets up the peer-address resolver. Post-cutover there is no

@@ -679,8 +679,14 @@ func (m *Manager) reverseConnectLoop(ctx context.Context) {
 				defer m.reverse.wg.Done()
 				defer func() { <-slots }()
 				defer func() { workersMu.Lock(); delete(workers, node.NodeUUID); workersMu.Unlock() }()
+				changed := m.peerChanges()
 				if err := m.attemptReverseSession(ctx, node); err != nil && ctx.Err() == nil {
-					m.reverseBackoff.Ended(node.NodeUUID, addrs, 0, time.Now())
+					select {
+					case <-changed:
+						m.reverseBackoff.Reset(node.NodeUUID)
+					default:
+						m.reverseBackoff.Ended(node.NodeUUID, addrs, 0, time.Now())
+					}
 				}
 			}(node)
 		}

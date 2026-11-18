@@ -24,6 +24,7 @@ func (m *Manager) peerServiceOptions() clustertrust.PeerServiceClientOptions {
 		},
 		BaseConfigDir: filepath.Dir(m.clusterDir),
 		ResolveRoute:  m.resolvePeerServiceRoute,
+		Changed:       m.peerChanges,
 	}
 }
 
