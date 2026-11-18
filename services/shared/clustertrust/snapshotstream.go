@@ -32,6 +32,12 @@ type SnapshotStreamServer[T any] struct {
 func ServeSnapshotStream[T any](w http.ResponseWriter, r *http.Request, s SnapshotStreamServer[T]) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	controller := http.NewResponseController(w)
+	if !s.Authorize() {
+		return
+	}
+	if controller.Flush() != nil {
+		return
+	}
 	send := func(value any) bool {
 		if !s.Authorize() {
 			return false

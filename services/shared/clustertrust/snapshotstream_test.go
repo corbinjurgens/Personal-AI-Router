@@ -156,7 +156,7 @@ func TestServeSnapshotStream(t *testing.T) {
 		waitEnd(t, lines, time.Second)
 		<-done
 		if got := calls.Load(); got != 3 {
-			t.Fatalf("Authorize calls = %d, want 3 (two frames, then refusal)", got)
+			t.Fatalf("Authorize calls = %d, want 3 (headers, one frame, then refusal)", got)
 		}
 	})
 
@@ -214,6 +214,40 @@ func TestServeSnapshotStream(t *testing.T) {
 			t.Fatalf("first frame = %+v, want N=3", got)
 		}
 	})
+}
+
+func TestServeSnapshotStreamSendsHeadersBeforeFirstFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ServeSnapshotStream(w, r, SnapshotStreamServer[streamFrame]{
+			Keepalive:    10 * time.Second,
+			WriteTimeout: time.Second,
+			Authorize:    func() bool { return true },
+			Updates:      make(chan streamFrame),
+		})
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	client := server.Client()
+	client.Transport = &http.Transport{ResponseHeaderTimeout: time.Second}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("headers did not arrive within 1 s: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("status/content type = %d/%q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	select {
+	case line := <-readLines(response.Body):
+		t.Fatalf("body sent a line before an update or keepalive: %q", line)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestReadSnapshotStream(t *testing.T) {
