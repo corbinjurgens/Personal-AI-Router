@@ -21,6 +21,7 @@ import (
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/netmon"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
@@ -107,6 +108,7 @@ type Manager struct {
 	// (engines_stream.go).
 	remoteEngines   remoteEngineCache
 	peerStreamRetry func() *clustertrust.PeerRetry // nil uses the shared production schedule
+	changed         func() <-chan struct{}
 	// catalog answers engine:catalog: the models an engine can download, as
 	// opposed to the ones it already holds.
 	catalog *catalogService
@@ -140,10 +142,12 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	m.controlHTTP = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: remoteResponseHeaderTimeout},
 		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
+		Changed: m.peerChanges,
 	})
 	m.controlReadyHTTP = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: remoteReadyResponseHeaderTimeout},
 		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
+		Changed: m.peerChanges,
 	})
 	m.admittedLoad.send = codec.NotifyContext
 	exec.admittedLoadParent = m.admittedLoad.call
@@ -166,6 +170,11 @@ func (m *Manager) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	defer cancel()
+	if mon, err := netmon.Watch(ctx); err != nil {
+		slog.Warn("network monitor unavailable", "err", err)
+	} else {
+		m.changed = mon.Changed
+	}
 	defer m.stopCopies()
 	// Restore exclusion before publishing readiness or accepting any activation.
 	if _, err := m.exec.restoreDiagnosticCheckpoint(); err != nil {
@@ -210,6 +219,13 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.controlHTTP.CloseIdle()
 	m.controlReadyHTTP.CloseIdle()
 	return err
+}
+
+func (m *Manager) peerChanges() <-chan struct{} {
+	if m.changed == nil {
+		return nil
+	}
+	return m.changed()
 }
 
 func (m *Manager) readLoop(ctx context.Context) error {

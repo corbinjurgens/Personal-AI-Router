@@ -356,7 +356,7 @@ func (m *Manager) notifyPeerSettings(nodeID string, snapshots []settings.Snapsho
 // keepPeerStream runs consume for node until ctx ends or the node leaves the
 // directory, calling ended after each stream and waiting the shared schedule.
 func (m *Manager) keepPeerStream(ctx context.Context, node string, consume func(context.Context, ecPeer) time.Duration, ended func()) {
-	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: m.newPeerStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: m.newPeerStreamRetry(), Changed: m.changed}, func(ctx context.Context) (time.Duration, bool) {
 		current, exists := m.peers.lookup(node)
 		if !exists {
 			return 0, false
@@ -424,6 +424,7 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) tim
 	}
 	defer response.Body.Close()
 	outcome, _ := clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
+		Changed: m.changed,
 		Idle:    settingsStreamIdle,
 		MaxLine: 256 * 1024,
 		Current: current,

@@ -65,6 +65,40 @@ func TestPeerStreamRetryLadderAndStableReset(t *testing.T) {
 	}
 }
 
+func TestPeerSettingsStreamReconnectsAfterChange(t *testing.T) {
+	f := newRemoteReverseFixture(t, func(*clustertrust.Mesh) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	})
+	var mu sync.Mutex
+	ch := make(chan struct{})
+	f.m.changed = func() <-chan struct{} { mu.Lock(); defer mu.Unlock(); return ch }
+	f.m.peerStreamRetry = func() *clustertrust.PeerRetry {
+		return &clustertrust.PeerRetry{Initial: time.Hour, Cap: time.Hour, StableAfter: time.Second}
+	}
+	ended := make(chan struct{}, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.m.keepPeerStream(ctx, f.node.HostUUID, f.m.consumeSettingsStream, func() { ended <- struct{}{} })
+	}()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("first settings attempt did not end")
+	}
+	mu.Lock()
+	close(ch)
+	ch = make(chan struct{})
+	mu.Unlock()
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("change did not reconnect manager settings stream")
+	}
+}
+
 func TestPeerStreamRefusalReason(t *testing.T) {
 	f := newRemoteReverseFixture(t, func(*clustertrust.Mesh) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
