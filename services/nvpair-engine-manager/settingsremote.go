@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -376,7 +377,7 @@ func (m *Manager) newPeerStreamRetry() *clustertrust.PeerRetry {
 
 // openPeerStream opens a read-only snapshot stream on a peer's ec surface. It
 // returns the 200 response and the stream's current check, which turns false
-// when the peer's route, admission or pinned identity changes.
+// when the stream's published endpoint, admission or pinned identity changes.
 func (m *Manager) openPeerStream(ctx context.Context, peer ecPeer, path string) (*http.Response, func() bool, string) {
 	client, err := m.remoteClient(ctx, peer)
 	if err != nil {
@@ -404,9 +405,10 @@ func (m *Manager) openPeerStream(ctx context.Context, peer ecPeer, path string) 
 	// also retires an active body when either identity or the endpoint changes;
 	// watchPeerSettings owns the subsequent read-only reconnect.
 	current := func() bool {
-		now, admitted := m.resolveControlRoute(peer.clusterUUID, noderec.ServiceEngineControl)
+		now, incarnation, admitted := m.resolveControlPeer(peer.clusterUUID)
 		live, pinned := m.mesh.ClientTLSConfig(peer.clusterUUID)
-		return admitted && now == route && pinned && len(live.Certificates) != 0 &&
+		return admitted && incarnation == route.Incarnation && now.generation == peer.generation &&
+			slices.Contains(now.addresses, req.URL.Hostname()) && pinned && len(live.Certificates) != 0 &&
 			bytes.Equal(live.Certificates[0].Certificate[0], config.Certificates[0].Certificate[0]) &&
 			response.TLS != nil && len(response.TLS.PeerCertificates) != 0 &&
 			live.VerifyPeerCertificate([][]byte{response.TLS.PeerCertificates[0].Raw}, nil) == nil

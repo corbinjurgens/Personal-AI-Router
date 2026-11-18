@@ -26,6 +26,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
+	"nvpair-shared/reach"
 )
 
 // fetchEnginesForTest is a plain GET /v1/engines over the control client with
@@ -601,6 +602,53 @@ func TestRemoteControlRouteTracksDiscoveryAndAdmission(t *testing.T) {
 	f.m.peers.set([]noderec.DirectoryNode{f.node, duplicate})
 	if _, ok := f.m.resolveControlRoute("uuid-peer", noderec.ServiceEngineControl); ok {
 		t.Fatal("ambiguous discovery principal was authorized")
+	}
+}
+
+func TestOpenPeerStreamSurvivesAddressPromotionUntilEndpointRemoved(t *testing.T) {
+	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
+		return (&controlServer{mesh: mesh}).requirePin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				t.Error(err)
+			}
+			<-r.Context().Done()
+		}))
+	})
+	f.directHealthy.Store(true)
+	n := f.node
+	n.IPs = []string{n.IP, "192.168.1.20"}
+	f.m.addrs = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
+		if address != f.server.Listener.Addr().String() {
+			return nil, errors.New("fixture candidate unavailable")
+		}
+		return net.DialTimeout(network, address, timeout)
+	}))
+	f.m.peers.set([]noderec.DirectoryNode{n})
+	peer, ok := f.m.peers.lookup(n.HostUUID)
+	if !ok {
+		t.Fatal("peer missing")
+	}
+	ctx := remoteFixtureContext(t)
+	response, current, reason := f.m.openPeerStream(ctx, peer, controlEnginesPath+"/events")
+	if response == nil {
+		t.Fatalf("open stream: %s", reason)
+	}
+	defer response.Body.Close()
+	if !current() {
+		t.Fatal("new stream is not current")
+	}
+	promoted := net.JoinHostPort(n.IPs[1], strconv.Itoa(peer.port))
+	if !f.m.peers.selectAddress(peer, promoted) {
+		t.Fatal("select promoted endpoint")
+	}
+	if !current() {
+		t.Error("address promotion invalidated an open stream on a still-published endpoint")
+	}
+	n.IP, n.IPs = n.IPs[1], nil
+	f.m.peers.set([]noderec.DirectoryNode{n})
+	if current() {
+		t.Error("stream remains current after its captured endpoint was removed")
 	}
 }
 

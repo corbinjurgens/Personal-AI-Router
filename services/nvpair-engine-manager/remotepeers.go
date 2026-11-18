@@ -98,14 +98,30 @@ func (d *peerDirectory) selectAddress(peer ecPeer, address string) bool {
 }
 
 func (m *Manager) resolveControlRoute(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
-	if service != noderec.ServiceEngineControl || m.mesh == nil {
+	if service != noderec.ServiceEngineControl {
 		return clustertrust.PeerServiceRoute{}, false
+	}
+	peer, incarnation, ok := m.resolveControlPeer(uuid)
+	if !ok {
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	if peer.selected == "" {
+		logControlAuthorityRefusal("resolve-control-route", uuid, clustertrust.PeerServiceDiagnostic{Predicate: "route_address_unselected"})
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: peer.selected,
+		Protocol: clustertrust.ReverseTLS, Generation: peer.selectedGeneration}, true
+}
+
+func (m *Manager) resolveControlPeer(uuid string) (ecPeer, string, bool) {
+	if m.mesh == nil {
+		return ecPeer{}, "", false
 	}
 	m.mesh.Refresh()
 	incarnation, ok, diagnostic := m.mesh.PeerServiceIncarnationWithDiagnostic(uuid)
 	if !ok {
 		logControlAuthorityRefusal("resolve-control-route", uuid, diagnostic)
-		return clustertrust.PeerServiceRoute{}, false
+		return ecPeer{}, "", false
 	}
 	m.peers.mu.RLock()
 	defer m.peers.mu.RUnlock()
@@ -115,21 +131,16 @@ func (m *Manager) resolveControlRoute(uuid string, service noderec.ServiceKey) (
 		if peer.clusterUUID == uuid {
 			if found { // Discovery cannot assign one principal to two targets.
 				logControlAuthorityRefusal("resolve-control-route", uuid, clustertrust.PeerServiceDiagnostic{Predicate: "route_principal_ambiguous"})
-				return clustertrust.PeerServiceRoute{}, false
+				return ecPeer{}, "", false
 			}
 			selected, found = peer, true
 		}
 	}
 	if !found {
 		logControlAuthorityRefusal("resolve-control-route", uuid, clustertrust.PeerServiceDiagnostic{Predicate: "route_peer_missing"})
-		return clustertrust.PeerServiceRoute{}, false
+		return ecPeer{}, "", false
 	}
-	if selected.selected == "" {
-		logControlAuthorityRefusal("resolve-control-route", uuid, clustertrust.PeerServiceDiagnostic{Predicate: "route_address_unselected"})
-		return clustertrust.PeerServiceRoute{}, false
-	}
-	return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: selected.selected,
-		Protocol: clustertrust.ReverseTLS, Generation: selected.selectedGeneration}, true
+	return selected, incarnation, true
 }
 
 // lookup resolves a target node id to its ec peer entry.
