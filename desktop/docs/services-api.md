@@ -296,10 +296,6 @@
 | `discovery:unregister` | request (we call) | ⚠️ not called |
 | `discovery:update-txt` | request (we call) | ⚠️ not called |
 
-**Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
-- `method (var)  (daemon.go, 3 sites)`
-- `method (var)  (peer_services.go)`
-
 ## nvpair-node-settings
 
 | Method | Direction | In bridge? |
