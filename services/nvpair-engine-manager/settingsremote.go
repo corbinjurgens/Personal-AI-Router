@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -353,48 +354,51 @@ func (m *Manager) notifyPeerSettings(nodeID string, snapshots []settings.Snapsho
 }
 
 // keepPeerStream runs consume for node until ctx ends or the node leaves the
-// directory, calling ended after each stream and pausing 3 s before the next.
-func (m *Manager) keepPeerStream(ctx context.Context, node string, consume func(context.Context, ecPeer), ended func()) {
-	for ctx.Err() == nil {
+// directory, calling ended after each stream and waiting the shared schedule.
+func (m *Manager) keepPeerStream(ctx context.Context, node string, consume func(context.Context, ecPeer) time.Duration, ended func()) {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: m.newPeerStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
 		current, exists := m.peers.lookup(node)
 		if !exists {
-			return
+			return 0, false
 		}
-		consume(ctx, current)
+		up := consume(ctx, current)
 		ended()
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(3 * time.Second):
-		}
+		return up, true
+	})
+}
+
+func (m *Manager) newPeerStreamRetry() *clustertrust.PeerRetry {
+	if m.peerStreamRetry != nil {
+		return m.peerStreamRetry()
 	}
+	return clustertrust.NewStreamRetry()
 }
 
 // openPeerStream opens a read-only snapshot stream on a peer's ec surface. It
 // returns the 200 response and the stream's current check, which turns false
 // when the peer's route, admission or pinned identity changes.
-func (m *Manager) openPeerStream(ctx context.Context, peer ecPeer, path string) (*http.Response, func() bool, bool) {
+func (m *Manager) openPeerStream(ctx context.Context, peer ecPeer, path string) (*http.Response, func() bool, string) {
 	client, err := m.remoteClient(ctx, peer)
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, "unreachable"
 	}
 	route, ok := m.resolveControlRoute(peer.clusterUUID, noderec.ServiceEngineControl)
 	config, pinned := m.mesh.ClientTLSConfig(peer.clusterUUID)
 	if !ok || !pinned || len(config.Certificates) == 0 {
-		return nil, nil, false
+		return nil, nil, "unreachable"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.base+path, nil)
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, "unreachable"
 	}
 	response, err := client.controlClient(false).Do(req)
 	if err != nil {
 		client.forgetAddress()
-		return nil, nil, false
+		return nil, nil, "unreachable"
 	}
 	if response.StatusCode != http.StatusOK {
 		response.Body.Close()
-		return nil, nil, false
+		return nil, nil, fmt.Sprintf("refused %d", response.StatusCode)
 	}
 	// The transport checks admission before dispatch. This subscription owner
 	// also retires an active body when either identity or the endpoint changes;
@@ -407,18 +411,19 @@ func (m *Manager) openPeerStream(ctx context.Context, peer ecPeer, path string) 
 			response.TLS != nil && len(response.TLS.PeerCertificates) != 0 &&
 			live.VerifyPeerCertificate([][]byte{response.TLS.PeerCertificates[0].Raw}, nil) == nil
 	}
-	return response, current, true
+	return response, current, ""
 }
 
-func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
+func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) time.Duration {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	response, current, ok := m.openPeerStream(ctx, peer, settingsPath+"events")
-	if !ok {
-		return
+	response, current, reason := m.openPeerStream(ctx, peer, settingsPath+"events")
+	defer func() { slog.Debug("peer stream ended", "kind", "settings", "node", peer.nodeID, "reason", reason) }()
+	if response == nil {
+		return 0
 	}
 	defer response.Body.Close()
-	_, _ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
+	outcome, _ := clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
 		Idle:    settingsStreamIdle,
 		MaxLine: 256 * 1024,
 		Current: current,
@@ -431,4 +436,6 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
 			return nil
 		},
 	})
+	reason = string(outcome.End)
+	return outcome.Healthy
 }

@@ -105,7 +105,8 @@ type Manager struct {
 	controlReadyHTTP *clustertrust.PeerServiceClient
 	// remoteEngines caches each peer's streamed engine status list
 	// (engines_stream.go).
-	remoteEngines remoteEngineCache
+	remoteEngines   remoteEngineCache
+	peerStreamRetry func() *clustertrust.PeerRetry // nil uses the shared production schedule
 	// catalog answers engine:catalog: the models an engine can download, as
 	// opposed to the ones it already holds.
 	catalog *catalogService

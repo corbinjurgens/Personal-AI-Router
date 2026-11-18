@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -213,12 +214,13 @@ func (c *remoteEngineCache) answer(nodeID string) (json.RawMessage, error) {
 // consumeEnginesStream subscribes to one peer's engine-status stream until it
 // ends, keeping the peer's cache entry while it is live and notifying each
 // change of its list.
-func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
+func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) time.Duration {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	response, current, ok := m.openPeerStream(ctx, peer, controlEnginesPath+"/events")
-	if !ok {
-		return
+	response, current, reason := m.openPeerStream(ctx, peer, controlEnginesPath+"/events")
+	defer func() { slog.Debug("peer stream ended", "kind", "engines", "node", peer.nodeID, "reason", reason) }()
+	if response == nil {
+		return 0
 	}
 	defer response.Body.Close()
 	entry := &remoteEnginesEntry{current: current}
@@ -231,7 +233,8 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 		// A replacement stream for this peer is already live; this one was
 		// superseded while it was opening.
 		cache.mu.Unlock()
-		return
+		reason = "superseded"
+		return 0
 	}
 	cache.peers[peer.nodeID] = entry
 	cache.mu.Unlock()
@@ -247,7 +250,7 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 		entry.lineAt = time.Now()
 		cache.mu.Unlock()
 	}
-	_, _ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[json.RawMessage]{
+	outcome, _ := clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[json.RawMessage]{
 		Idle:        enginesStreamIdle,
 		Recheck:     enginesStreamRecheck,
 		MaxLine:     enginesStreamMaxLine,
@@ -281,4 +284,6 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 			return nil
 		},
 	})
+	reason = string(outcome.End)
+	return outcome.Healthy
 }
