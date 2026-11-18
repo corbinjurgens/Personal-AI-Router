@@ -23,9 +23,9 @@ import (
 //
 // This collector is responsible for every dynamic number in
 // /v1/node-info: per-adapter VRAM used and GPU busy %, overall CPU
-// busy %, and memory-used bytes. Static identity (GPU name, total
-// VRAM, CPU name + cores, total RAM) is detected elsewhere once at
-// startup and passed to buildResponse.
+// busy %, and memory-used bytes. GPU inventory is cached until DXGI reports
+// a change or the refresh backstop expires. Other static identity (CPU name
+// + cores, total RAM) is detected at startup and passed to buildResponse.
 //
 // GPU counters we use:
 //
@@ -101,6 +101,10 @@ const (
 )
 
 var (
+	gpuInventoryBackstop  = 60 * time.Second
+	detectGPUInventory    = detectGPUsWithFactory
+	gpuInventoryIsCurrent = isCurrent
+
 	modPDH                           = windows.NewLazySystemDLL("pdh.dll")
 	procPdhOpenQueryW                = modPDH.NewProc("PdhOpenQueryW")
 	procPdhAddEnglishCounterW        = modPDH.NewProc("PdhAddEnglishCounterW")
@@ -185,6 +189,12 @@ type statsCollector struct {
 	hasVRAM       bool
 	hasEngine     bool
 	hasCPU        bool
+
+	// Owned only by the sampling goroutine; native calls never hold a lock
+	// needed by snapshot readers or Stop.
+	gpuInventory  []GPUInfo
+	gpuFactory    unsafe.Pointer
+	gpuDetectedAt time.Time
 
 	// latest is swapped atomically by the ticker goroutine. Readers
 	// copy the pointer and read the snapshot; they never see a torn
@@ -297,6 +307,10 @@ func (c *statsCollector) addCounter(path string, unavailFlag *atomic.Bool) (uint
 
 func (c *statsCollector) run() {
 	defer close(c.done)
+	defer func() {
+		comRelease(c.gpuFactory)
+		c.gpuFactory = nil
+	}()
 	ticker := time.NewTicker(statsTickInterval)
 	defer ticker.Stop()
 	for {
@@ -322,7 +336,13 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	snap := sampleSystemMemory(previous, readWindowsMemoryFacts)
 	gpuStart, clockErr := memoryClock()
 	gpuAt := time.Now().UTC()
-	adapters := detectGPUs()
+	if c.gpuDetectedAt.IsZero() || time.Since(c.gpuDetectedAt) >= gpuInventoryBackstop || !gpuInventoryIsCurrent(c.gpuFactory) {
+		comRelease(c.gpuFactory)
+		c.gpuFactory = nil
+		c.gpuInventory, c.gpuFactory = detectGPUInventory()
+		c.gpuDetectedAt = time.Now()
+	}
+	adapters := c.gpuInventory
 	snap.GPUInventory = adapters
 	var currentGPU map[string]gpuStat
 

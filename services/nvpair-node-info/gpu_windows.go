@@ -26,8 +26,9 @@ import (
 // We deliberately do NOT use the WMI Win32_VideoController.AdapterRAM field:
 // it is a UINT32 capped at 4 GiB and is wrong for every modern dGPU.
 //
-// VRAM is a hardware property and never changes at runtime, so this runs once
-// at startup (matching the existing one-shot detect+marshal pattern in main.go).
+// Startup detects its own inventory. The collector retains its DXGI factory
+// and refreshes inventory when IsCurrent reports a change or after 60 seconds,
+// covering registry-only changes such as the RDP phantom-adapter gate.
 
 // IID_IDXGIFactory1 = {770aae78-f26f-4dba-a829-253c83d1b387}
 // https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nn-dxgi-idxgifactory1
@@ -120,6 +121,7 @@ const (
 	//               CreateSoftwareAdapter(11)
 	// IDXGIFactory1: EnumAdapters1(12), IsCurrent(13)
 	vtblIDXGIFactory1EnumAdapters1 = 12
+	vtblIDXGIFactory1IsCurrent     = 13
 
 	// IDXGIObject (3-6) + IDXGIAdapter: EnumOutputs(7), GetDesc(8),
 	//             CheckInterfaceSupport(9)
@@ -151,6 +153,10 @@ func comRelease(iface unsafe.Pointer) {
 		return
 	}
 	vtableCall(iface, vtblIUnknownRelease)
+}
+
+func isCurrent(factory unsafe.Pointer) bool {
+	return factory != nil && vtableCall(factory, vtblIDXGIFactory1IsCurrent) != 0
 }
 
 func enumAdapters1(factory unsafe.Pointer, index uint32) (unsafe.Pointer, uintptr) {
@@ -283,6 +289,14 @@ func keepRenderAdapter(adapterType uint32) bool {
 }
 
 func detectGPUs() []GPUInfo {
+	gpus, factory := detectGPUsWithFactory()
+	comRelease(factory)
+	return gpus
+}
+
+// detectGPUsWithFactory transfers the factory reference to the caller, which
+// must release it after it no longer needs to check the inventory's currency.
+func detectGPUsWithFactory() ([]GPUInfo, unsafe.Pointer) {
 	var factory unsafe.Pointer
 	hr, _, _ := procCreateDXGIFactory1.Call(
 		uintptr(unsafe.Pointer(&iidIDXGIFactory1)),
@@ -291,9 +305,8 @@ func detectGPUs() []GPUInfo {
 	if hr != 0 || factory == nil {
 		slog.Warn("CreateDXGIFactory1 failed; no GPUs will be reported",
 			"hr", fmt.Sprintf("0x%08x", uint32(hr)))
-		return nil
+		return nil, nil
 	}
-	defer comRelease(factory)
 
 	physical, err := loadPhysicalAdapterLUIDs()
 	if err != nil {
@@ -356,5 +369,5 @@ func detectGPUs() []GPUInfo {
 			statsKey:  luidKey(desc.AdapterLuidLow, desc.AdapterLuidHigh),
 		})
 	}
-	return gpus
+	return gpus, factory
 }

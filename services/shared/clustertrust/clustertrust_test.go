@@ -4,6 +4,7 @@
 package clustertrust
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -237,5 +239,134 @@ func TestTrustReloadAndTamperSkip(t *testing.T) {
 	tr.Reload()
 	if tr.Count() != 2 {
 		t.Fatalf("tampered pin must be skipped, count = %d, want 2", tr.Count())
+	}
+}
+
+func countTrustPinParses(t *testing.T) *int {
+	t.Helper()
+	parse := parseTrustPinDER
+	calls := new(int)
+	parseTrustPinDER = func(innerUUID, certPEM, fileUUID string) ([]byte, error) {
+		*calls++
+		return parse(innerUUID, certPEM, fileUUID)
+	}
+	t.Cleanup(func() { parseTrustPinDER = parse })
+	return calls
+}
+
+func TestTrustReloadReusesUnchangedPin(t *testing.T) {
+	calls := countTrustPinParses(t)
+	dir := t.TempDir()
+	certPEM, _, der := genLeaf(t, "uuid-peer")
+	writePin(t, dir, "uuid-peer", string(certPEM))
+	trust := newTrust(dir)
+	for range 3 {
+		trust.Reload()
+		if !trust.MatchDER("uuid-peer", der) {
+			t.Fatal("unchanged pin no longer matches its certificate")
+		}
+	}
+	if *calls != 1 {
+		t.Fatalf("pin parses = %d, want 1 over three reloads", *calls)
+	}
+}
+
+func TestTrustReloadRevalidatesChangedPin(t *testing.T) {
+	test := func(name, replacement string) {
+		t.Run(name, func(t *testing.T) {
+			calls := countTrustPinParses(t)
+			dir := t.TempDir()
+			certPEM, _, oldDER := genLeaf(t, "uuid-peer")
+			writePin(t, dir, "uuid-peer", string(certPEM))
+			trust := newTrust(dir)
+			trust.Reload()
+
+			newPEM, _, newDER := genLeaf(t, "uuid-peer")
+			writePin(t, dir, "uuid-peer", string(newPEM))
+			trust.Reload()
+			if *calls != 2 || !trust.MatchDER("uuid-peer", newDER) || trust.MatchDER("uuid-peer", oldDER) {
+				t.Fatalf("changed pin was not revalidated: parses = %d, want 2 and only the new DER", *calls)
+			}
+
+			path := filepath.Join(dir, "trusted", "uuid-peer.json")
+			if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+				t.Fatalf("write invalid replacement: %v", err)
+			}
+			trust.Reload()
+			if _, ok := trust.DER("uuid-peer"); ok {
+				t.Fatal("invalid replacement retained the old pin")
+			}
+			if len(trust.pins) != 0 {
+				t.Fatal("invalid replacement retained a cached pin")
+			}
+
+			beforeRestore := *calls
+			writePin(t, dir, "uuid-peer", string(newPEM))
+			trust.Reload()
+			if *calls != beforeRestore+1 || !trust.MatchDER("uuid-peer", newDER) {
+				t.Fatal("restored pin was not parsed again")
+			}
+		})
+	}
+	test("malformed JSON", "{not json")
+	test("invalid certificate", `{"nodeUuid":"uuid-peer","certPem":"invalid"}`)
+}
+
+func TestTrustReloadRemovesDeletedPinCache(t *testing.T) {
+	calls := countTrustPinParses(t)
+	dir := t.TempDir()
+	certPEM, _, der := genLeaf(t, "uuid-peer")
+	writePin(t, dir, "uuid-peer", string(certPEM))
+	trust := newTrust(dir)
+	trust.Reload()
+	if err := os.Remove(filepath.Join(dir, "trusted", "uuid-peer.json")); err != nil {
+		t.Fatalf("delete pin: %v", err)
+	}
+	trust.Reload()
+	if trust.Count() != 0 || len(trust.pins) != 0 {
+		t.Fatal("deleted pin remains published or cached")
+	}
+	writePin(t, dir, "uuid-peer", string(certPEM))
+	trust.Reload()
+	if *calls != 2 || !trust.MatchDER("uuid-peer", der) {
+		t.Fatal("recreated pin was not parsed again")
+	}
+}
+
+func TestTrustReloadKeepsUnreadablePin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based unreadable pin is not portable to Windows ACLs")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	calls := countTrustPinParses(t)
+	dir := t.TempDir()
+	certPEM, _, der := genLeaf(t, "uuid-peer")
+	writePin(t, dir, "uuid-peer", string(certPEM))
+	trust := newTrust(dir)
+	trust.Reload()
+	path := filepath.Join(dir, "trusted", "uuid-peer.json")
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("make pin unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Errorf("restore pin permissions: %v", err)
+		}
+	})
+	if _, err := readAuthorityFile(path); err == nil {
+		t.Fatal("pin is still readable")
+	}
+	trust.Reload()
+	if got, ok := trust.DER("uuid-peer"); !ok || !bytes.Equal(got, der) {
+		t.Fatal("unreadable pin dropped or changed its previous DER")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("restore pin permissions: %v", err)
+	}
+	trust.Reload()
+	if *calls != 1 || !trust.MatchDER("uuid-peer", der) {
+		t.Fatal("unreadable interval lost the cached validation")
 	}
 }

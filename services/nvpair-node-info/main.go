@@ -182,6 +182,11 @@ func buildResponse(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap sta
 }
 
 func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap statsSnapshot, hostUUID string, clusterUUID *string, now time.Time) []byte {
+	body, _ := json.Marshal(buildSampleAt(gpus, cpuStatic, memTotal, snap, hostUUID, clusterUUID, now))
+	return body
+}
+
+func buildSampleAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap statsSnapshot, hostUUID string, clusterUUID *string, now time.Time) NodeInfoResponse {
 	memory := responseMemory(snap)
 	physicalIDs := gpuPhysicalAliases(memory, gpus, snap.GPUInventory)
 	outGPUs := mergeGPUInventory(gpus, snap.GPUInventory)
@@ -226,8 +231,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 			UsedBytes:  snap.MemUsedBytes,
 		}
 	}
-	body, _ := json.Marshal(resp)
-	return body
+	return resp
 }
 
 // gpuPhysicalAliases joins only exact observed device aliases from validated
@@ -451,10 +455,14 @@ func main() {
 		return &principal
 	}
 
-	body := func() []byte {
-		return buildResponse(gpus, cpu, memTotal, collector.Snapshot(), hostUUID, clusterPrincipal())
+	sample := func() NodeInfoResponse {
+		return buildSampleAt(gpus, cpu, memTotal, collector.Snapshot(), hostUUID, clusterPrincipal(), time.Now())
 	}
-	pub := &nodeInfoPublisher{hub: clustertrust.SnapshotHub[json.RawMessage]{Limit: nodeInfoStreamsTotal}, body: body}
+	body := func() []byte {
+		encoded, _ := json.Marshal(sample())
+		return encoded
+	}
+	pub := &nodeInfoPublisher{hub: clustertrust.SnapshotHub[json.RawMessage]{Limit: nodeInfoStreamsTotal}, sample: sample}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/node-info", nodeInfoHandler(mesh, body))

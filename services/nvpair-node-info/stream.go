@@ -143,8 +143,12 @@ func distance(a, b uint64) uint64 {
 // of GET /v1/node-info/events: a frame is published only when nodeInfoChanged
 // says the sample moved beyond the thresholds of the last published frame.
 type nodeInfoPublisher struct {
-	hub  clustertrust.SnapshotHub[json.RawMessage]
-	body func() []byte
+	hub    clustertrust.SnapshotHub[json.RawMessage]
+	sample func() NodeInfoResponse
+}
+
+var marshalNodeInfoSample = func(sample NodeInfoResponse) ([]byte, error) {
+	return json.Marshal(sample)
 }
 
 // run publishes the first sample at once, then every nodeInfoPublishEvery
@@ -156,11 +160,12 @@ func (p *nodeInfoPublisher) run(ctx context.Context) {
 	var last NodeInfoResponse
 	published := false
 	for {
-		body := p.body()
-		var candidate NodeInfoResponse
-		if json.Unmarshal(body, &candidate) == nil && (!published || nodeInfoChanged(last, candidate)) {
-			p.hub.Publish(json.RawMessage(body))
-			last, published = candidate, true
+		candidate := p.sample()
+		if !published || nodeInfoChanged(last, candidate) {
+			if body, err := marshalNodeInfoSample(candidate); err == nil {
+				p.hub.Publish(json.RawMessage(body))
+				last, published = candidate, true
+			}
 		}
 		select {
 		case <-ctx.Done():

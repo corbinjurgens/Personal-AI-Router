@@ -6,9 +6,100 @@
 package main
 
 import (
+	"reflect"
 	"testing"
+	"time"
 	"unsafe"
 )
+
+func stubWindowsGPUInventory(t *testing.T, inventory []GPUInfo) (*statsCollector, *int, *testDXGIFactory) {
+	t.Helper()
+	oldDetect, oldCurrent, oldBackstop := detectGPUInventory, gpuInventoryIsCurrent, gpuInventoryBackstop
+	collector := &statsCollector{}
+	factory := newTestDXGIFactory()
+	detections := 0
+	detectGPUInventory = func() ([]GPUInfo, unsafe.Pointer) {
+		detections++
+		return inventory, unsafe.Pointer(factory)
+	}
+	gpuInventoryIsCurrent = func(ptr unsafe.Pointer) bool {
+		if ptr != unsafe.Pointer(factory) {
+			t.Fatalf("checked factory %p, want %p", ptr, factory)
+		}
+		return factory.current
+	}
+	gpuInventoryBackstop = time.Minute
+	t.Cleanup(func() {
+		comRelease(collector.gpuFactory)
+		detectGPUInventory, gpuInventoryIsCurrent, gpuInventoryBackstop = oldDetect, oldCurrent, oldBackstop
+	})
+	return collector, &detections, factory
+}
+
+func TestWindowsGPUInventoryDetectsOnceAcrossUnchangedTicks(t *testing.T) {
+	collector, detections, _ := stubWindowsGPUInventory(t, []GPUInfo{{Name: "unchanged GPU"}})
+	for tick := 0; tick < 5; tick++ {
+		collector.latest.Store(collector.decodeSnapshot())
+	}
+	if *detections != 1 {
+		t.Fatalf("detections over five unchanged ticks = %d, want 1", *detections)
+	}
+}
+
+func TestWindowsGPUInventoryRedetectsOnAdapterChange(t *testing.T) {
+	collector, detections, factory := stubWindowsGPUInventory(t, []GPUInfo{{Name: "GPU"}})
+	collector.latest.Store(collector.decodeSnapshot())
+	factory.current = false
+	collector.latest.Store(collector.decodeSnapshot())
+	if *detections != 2 {
+		t.Fatalf("detections on changed tick = %d, want 2", *detections)
+	}
+	if factory.releases != 1 {
+		t.Fatalf("old factory releases = %d, want 1", factory.releases)
+	}
+}
+
+func TestWindowsGPUInventoryRedetectsAfterBackstop(t *testing.T) {
+	collector, detections, factory := stubWindowsGPUInventory(t, []GPUInfo{{Name: "GPU"}})
+	collector.latest.Store(collector.decodeSnapshot())
+	collector.gpuDetectedAt = time.Now().Add(-gpuInventoryBackstop)
+	collector.latest.Store(collector.decodeSnapshot())
+	if *detections != 2 {
+		t.Fatalf("detections after backstop with current factory = %d, want 2", *detections)
+	}
+	if factory.releases != 1 {
+		t.Fatalf("expired factory releases = %d, want 1", factory.releases)
+	}
+}
+
+func TestWindowsGPUInventoryPublishesDetectedInventoryOnCachedTicks(t *testing.T) {
+	inventory := []GPUInfo{
+		{Name: "discrete GPU", VramBytes: 16 << 30, statsKey: "discrete"},
+		{Name: "integrated GPU", VramBytes: 128 << 20, statsKey: "integrated"},
+	}
+	collector, _, _ := stubWindowsGPUInventory(t, inventory)
+	for tick := 0; tick < 5; tick++ {
+		collector.latest.Store(collector.decodeSnapshot())
+		if got := collector.Snapshot().GPUInventory; !reflect.DeepEqual(got, inventory) {
+			t.Fatalf("published inventory on tick %d = %+v, want %+v", tick+1, got, inventory)
+		}
+	}
+}
+
+func TestWindowsGPUInventoryReleasesFactoryOnStop(t *testing.T) {
+	factory := newTestDXGIFactory()
+	collector := &statsCollector{
+		gpuFactory: unsafe.Pointer(factory),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+	go collector.run()
+	collector.Stop()
+	collector.Stop()
+	if factory.releases != 1 || collector.gpuFactory != nil {
+		t.Fatalf("stopped factory: releases = %d, pointer = %p; want 1 and nil", factory.releases, collector.gpuFactory)
+	}
+}
 
 // TestLuidKey locks down the PDH instance-name format. If this ever drifts
 // from PDH's actual output the per-adapter join performed by
