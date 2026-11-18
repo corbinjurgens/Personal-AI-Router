@@ -38,9 +38,6 @@ const (
 	// peerStreamLimit caps the streams of one kind; it matches the producers'
 	// own total stream caps.
 	peerStreamLimit = 64
-	// peerStreamHealthy is how long a stream that delivered a frame must stay
-	// open for its reconnect backoff to reset.
-	peerStreamHealthy = 5 * time.Second
 )
 
 // nodeInfoStreamState holds the supervised streams of every kind (node-info in
@@ -175,52 +172,28 @@ func (s *nodeInfoStreamState) reconcileLocked(ctx context.Context, active *map[s
 	}
 }
 
-// runPeerStream keeps one peer stream open until ctx ends: it calls once for
-// each attempt and ended after it, then reconnects after telemetryRetryDelay.
-// Failures reset after an attempt once reports healthy.
-func runPeerStream(ctx context.Context, once func(context.Context) bool, ended func()) {
-	failures := 0
-	for {
-		healthy := once(ctx)
-		ended()
-		if ctx.Err() != nil {
-			return
-		}
-		if healthy {
-			failures = 0
-		} else {
-			failures++
-		}
-		retry := time.NewTimer(telemetryRetryDelay(failures))
-		select {
-		case <-ctx.Done():
-			retry.Stop()
-			return
-		case <-retry.C:
-		}
-	}
-}
+// Tests replace the factory to shorten stream reconnect timing.
+var newPeerStreamRetry = clustertrust.NewStreamRetry
 
 // peerStreamRead reads one stream attempt at one candidate address. tryNext
 // reports a connection failure that the next candidate address may not share.
-type peerStreamRead func(client *http.Client, current func() bool, node noderec.DirectoryNode, host string, port int) (healthy, tryNext bool)
+type peerStreamRead func(client *http.Client, current func() bool, node noderec.DirectoryNode, host string, port int) (up time.Duration, tryNext bool)
 
 // streamPeerOnce opens one stream to hostUUID's service through the node's
-// candidate addresses and reads it until it ends. It reports whether the
-// stream was healthy.
-func (d *daemon) streamPeerOnce(hostUUID string, service noderec.ServiceKey, read peerStreamRead) bool {
+// candidate addresses and reads it until it ends, reporting its healthy time.
+func (d *daemon) streamPeerOnce(hostUUID string, service noderec.ServiceKey, read peerStreamRead) time.Duration {
 	node, ok := d.streamPeerNode(hostUUID)
 	if !ok {
-		return false
+		return 0
 	}
 	endpoint, ok := node.Services[service]
 	if !ok {
-		return false
+		return 0
 	}
 	for _, host := range node.CandidateIPs() {
 		client, current, closeClient, admitted := d.peerStreamClient(hostUUID, node.ClusterUUID, host, endpoint.Port, service)
 		if !admitted {
-			return false
+			return 0
 		}
 		healthy, tryNext := read(client, current, node, host, endpoint.Port)
 		closeClient()
@@ -228,7 +201,7 @@ func (d *daemon) streamPeerOnce(hostUUID string, service noderec.ServiceKey, rea
 			return healthy
 		}
 	}
-	return false
+	return 0
 }
 
 // connectPeerStream sends the stream request on streamCtx, cancelling it when
@@ -267,26 +240,26 @@ func connectPeerStream(ctx, streamCtx context.Context, cancel context.CancelFunc
 
 // runNodeInfoStream keeps one node-info stream to hostUUID open until ctx ends.
 func (d *daemon) runNodeInfoStream(ctx context.Context, hostUUID string, id uint64) {
-	runPeerStream(ctx, func(ctx context.Context) bool {
-		return d.streamPeerOnce(hostUUID, noderec.ServiceNodeInfo, func(client *http.Client, current func() bool, _ noderec.DirectoryNode, host string, port int) (bool, bool) {
+	clustertrust.KeepPeerStream(ctx, clustertrust.PeerStreamLoop{Retry: newPeerStreamRetry()}, func(ctx context.Context) (time.Duration, bool) {
+		up := d.streamPeerOnce(hostUUID, noderec.ServiceNodeInfo, func(client *http.Client, current func() bool, _ noderec.DirectoryNode, host string, port int) (time.Duration, bool) {
 			return d.readNodeInfoStream(ctx, client, current, hostUUID, host, port, id)
 		})
-	}, func() { d.dropLiveNodeInfo(hostUUID, id) })
+		d.dropLiveNodeInfo(hostUUID, id)
+		return up, true
+	})
 }
 
 // readNodeInfoStream connects to one address and reads its node-info stream.
-func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, host string, port int, id uint64) (healthy, tryNext bool) {
+func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, host string, port int, id uint64) (up time.Duration, tryNext bool) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	url := "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + nodeInfoStreamPath
 	resp, tryNext := connectPeerStream(ctx, streamCtx, cancel, client, url, "node-info", hostUUID, host)
 	if resp == nil {
-		return false, tryNext
+		return 0, tryNext
 	}
 	defer resp.Body.Close()
-	opened := time.Now()
-	gotFrame := false
-	_, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[NodeInfoResponse]{
+	outcome, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[NodeInfoResponse]{
 		Idle:    nodeInfoStreamIdle,
 		MaxLine: nodeInfoStreamMaxLine,
 		Current: func() bool {
@@ -305,13 +278,12 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 		},
 		OnFrame: func(info NodeInfoResponse) error {
 			d.applyNodeInfoFrame(hostUUID, port, id, info, current)
-			gotFrame = true
 			return nil
 		},
 		OnKeepalive: func() { d.reemitNodeInfoKeepalive(hostUUID, id) },
 	})
 	slog.Debug("node-info stream ended", "host_uuid", hostUUID, "ip", host, "err", err)
-	return gotFrame && time.Since(opened) >= peerStreamHealthy, false
+	return outcome.Healthy, false
 }
 
 // applyNodeInfoFrame runs a frame through the pulled sample's apply path, caches

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
 )
 
@@ -42,6 +43,43 @@ type streamPeerFixture struct {
 }
 
 type eofReader struct{}
+
+func testScannerStreamRetry(t *testing.T, d *daemon, run func(context.Context)) {
+	t.Helper()
+	previous := newPeerStreamRetry
+	newPeerStreamRetry = func() *clustertrust.PeerRetry {
+		return &clustertrust.PeerRetry{Initial: 20 * time.Millisecond, Cap: time.Second, StableAfter: time.Second, Jitter: func() float64 { return 1 }}
+	}
+	t.Cleanup(func() { newPeerStreamRetry = previous })
+	dial := d.peerDialContext
+	starts := make(chan time.Time, 8)
+	d.peerDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		starts <- time.Now()
+		return dial(ctx, network, address)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); run(ctx) }()
+	defer func() { cancel(); <-done }()
+	var prior time.Time
+	for _, delay := range []time.Duration{0, 20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond} {
+		select {
+		case at := <-starts:
+			if !prior.IsZero() && at.Sub(prior) < delay {
+				t.Fatalf("retry after %v, want >= %v", at.Sub(prior), delay)
+			}
+			prior = at
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing retry")
+		}
+	}
+}
+
+func TestNodeInfoStreamRetryLadder(t *testing.T) {
+	f := newStreamPeerFixture(t)
+	f.status.Store(http.StatusServiceUnavailable)
+	testScannerStreamRetry(t, f.d, func(ctx context.Context) { f.d.runNodeInfoStream(ctx, "peer", 1) })
+}
 
 func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
 
@@ -278,8 +316,8 @@ func TestNodeInfoStreamRefusalBacksOff(t *testing.T) {
 	f.status.Store(http.StatusForbidden)
 	f.supervise(t)
 	time.Sleep(3 * time.Second)
-	if attempts := f.streams.Load(); attempts < 1 || attempts > 2 {
-		t.Fatalf("stream attempts in 3 s after 403 = %d, want 1 or 2", attempts)
+	if attempts := f.streams.Load(); attempts < 2 || attempts > 3 {
+		t.Fatalf("stream attempts in 3 s after 403 = %d, want 2 or 3 (jittered 1s, then 2s)", attempts)
 	}
 }
 
