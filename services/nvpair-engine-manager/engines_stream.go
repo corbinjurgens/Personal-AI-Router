@@ -58,13 +58,15 @@ type enginesPublisher struct {
 	signal  chan struct{}
 	readers atomic.Int64
 
-	mu   sync.Mutex // serializes rebuilds; guards list and last
+	mu   sync.Mutex // serializes rebuilds; guards list
 	list func() []EngineStatus
-	last []byte
 }
 
 func newEnginesPublisher() *enginesPublisher {
-	return &enginesPublisher{signal: make(chan struct{}, 1)}
+	return &enginesPublisher{
+		hub:    clustertrust.SnapshotHub[json.RawMessage]{RetainWhileRead: true},
+		signal: make(chan struct{}, 1),
+	}
 }
 
 // poke asks for a rebuild after enginesRebuildDelay. It never blocks.
@@ -89,19 +91,19 @@ func (p *enginesPublisher) rebuild() {
 	if p.list == nil {
 		return
 	}
+	epoch := p.hub.Epoch()
 	raw, err := json.Marshal(map[string]any{"engines": p.list()})
-	if err != nil || bytes.Equal(raw, p.last) {
+	last, has := p.hub.Latest()
+	if err != nil || (has && bytes.Equal(raw, last)) {
 		return
 	}
-	p.last = raw
-	p.hub.Publish(json.RawMessage(raw))
+	p.hub.PublishAt(epoch, json.RawMessage(raw))
 }
 
 // subscribe adds a stream reader and asks run for a rebuild. The reader gets
-// the last published list at once, if any; after a period with no readers that
-// list may be old, and the rebuild (about enginesRebuildDelay later) sends the
-// current one if it differs. Straight after start-up nothing is published, so
-// the first reader waits for that rebuild. The rebuild is left to run rather than done here
+// the last published list at once, if any. After a period with no readers, the
+// first reader waits for a fresh rebuild, as after start-up. A rebuild collected
+// before that idle period is discarded. The rebuild is left to run rather than done here
 // because it can wait up to the bounded read budget per busy engine (see
 // publishedStatuses), and the stream must open without waiting for it.
 func (p *enginesPublisher) subscribe() (<-chan json.RawMessage, func(), bool) {
