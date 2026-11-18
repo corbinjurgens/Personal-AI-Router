@@ -681,21 +681,25 @@ func (d *daemon) reconcileTrust() {
 		// nil principal: this pass knows the pin set, not what each peer
 		// advertises, so it re-derives trust from whatever principal is stored
 		// when the write lands rather than from the snapshot it is iterating.
-		node, changed := d.dir.applyClusterIdentity(n.HostUUID, nil, d.mesh.HasPin)
+		node, changed, err := d.updateClusterIdentity(n.HostUUID, nil)
 		if !changed {
 			continue
 		}
 		slog.Info("node trust changed", "host_uuid", n.HostUUID,
-			"cluster_uuid", n.ClusterUUID, "trusted", node.Trusted)
-		d.emit(noderec.NotifyNodeUpdated, node)
+			"cluster_uuid", node.ClusterUUID, "trusted", node.Trusted)
+		logNodeNotifyError(noderec.NotifyNodeUpdated, err)
 	}
 }
 
 // emit pushes a discovery:node-* event for a directory node. Nil-codec-safe so
 // directory-only unit tests can drive the daemon without a wired codec.
 func (d *daemon) emit(method string, node noderec.DirectoryNode) {
+	logNodeNotifyError(method, d.notifyNode(method, node))
+}
+
+func (d *daemon) notifyNode(method string, node noderec.DirectoryNode) error {
 	if d.codec == nil {
-		return
+		return nil
 	}
 	event := noderec.NodeEvent{Node: cloneDownloadNode(node)}
 	if d.dir != nil {
@@ -707,17 +711,29 @@ func (d *daemon) emit(method string, node noderec.DirectoryNode) {
 	if event.Node.ModelIdentities != nil && !jsonrpc.NotificationFitsFrame(method, event, jsonrpc.DefaultFrameBytes) {
 		event.Node.ModelIdentities = nil
 	}
-	if err := d.codec.Notify(method, event); err != nil {
+	return d.codec.Notify(method, event)
+}
+
+func logNodeNotifyError(method string, err error) {
+	if err != nil {
 		slog.Warn("failed to emit node event", "method", method, "err", err)
 	}
 }
 
 func (d *daemon) emitTelemetry(telemetry noderec.NodeTelemetry) {
+	logTelemetryNotifyError(telemetry.HostUUID, d.notifyTelemetry(telemetry))
+}
+
+func (d *daemon) notifyTelemetry(telemetry noderec.NodeTelemetry) error {
 	if d.codec == nil {
-		return
+		return nil
 	}
-	if err := d.codec.Notify(noderec.NotifyNodeTelemetry, telemetry); err != nil {
-		slog.Warn("failed to emit node telemetry", "host_uuid", telemetry.HostUUID, "err", err)
+	return d.codec.Notify(noderec.NotifyNodeTelemetry, telemetry)
+}
+
+func logTelemetryNotifyError(hostUUID string, err error) {
+	if err != nil {
+		slog.Warn("failed to emit node telemetry", "host_uuid", hostUUID, "err", err)
 	}
 }
 
@@ -1696,17 +1712,35 @@ func (d *daemon) refreshNodeClusterIdentityCandidates(hostUUID string, hosts []s
 // principal into the directory, emitting one discovery:node-updated when it
 // moved. An absent report (nil) leaves the annotation alone.
 func (d *daemon) applyReportedClusterIdentity(hostUUID string, clusterUUID *string) bool {
-	if clusterUUID == nil {
-		return false
+	node, changed, err := d.notifyReportedClusterIdentity(hostUUID, clusterUUID)
+	if changed {
+		logReportedClusterIdentity(node, err)
 	}
+	return changed
+}
+
+func (d *daemon) notifyReportedClusterIdentity(hostUUID string, clusterUUID *string) (noderec.DirectoryNode, bool, error) {
+	if clusterUUID == nil {
+		return noderec.DirectoryNode{}, false, nil
+	}
+	return d.updateClusterIdentity(hostUUID, clusterUUID)
+}
+
+func (d *daemon) updateClusterIdentity(hostUUID string, clusterUUID *string) (noderec.DirectoryNode, bool, error) {
+	// Serialize trust annotation with other identity passes and claim retirement.
+	d.peerServicesMu.Lock()
+	defer d.peerServicesMu.Unlock()
 	node, changed := d.dir.applyClusterIdentity(hostUUID, clusterUUID, d.mesh.HasPin)
 	if !changed {
-		return false
+		return node, false, nil
 	}
-	slog.Info("peer cluster membership changed", "host_uuid", hostUUID,
+	return node, true, d.notifyNode(noderec.NotifyNodeUpdated, node)
+}
+
+func logReportedClusterIdentity(node noderec.DirectoryNode, err error) {
+	slog.Info("peer cluster membership changed", "host_uuid", node.HostUUID,
 		"clustered", node.Clustered(), "trusted", node.Trusted)
-	d.emit(noderec.NotifyNodeUpdated, node)
-	return true
+	logNodeNotifyError(noderec.NotifyNodeUpdated, err)
 }
 
 // invalidatePeerServicesRoute discards endpoint-derived state while retaining

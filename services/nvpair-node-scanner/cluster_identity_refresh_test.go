@@ -350,6 +350,30 @@ func TestPinSetPassCannotWriteBackAPrincipal(t *testing.T) {
 	}
 }
 
+func TestClusterIdentityResolvesTrustOutsideDirectoryAndRechecksPrincipal(t *testing.T) {
+	dir := newDirectory()
+	dir.upsert(noderec.DirectoryNode{HostUUID: "peer", ClusterUUID: "first"})
+	var checked []string
+	node, changed := dir.applyClusterIdentity("peer", nil, func(principal string) bool {
+		checked = append(checked, principal)
+		if !dir.mu.TryLock() {
+			t.Error("trust lookup ran under the directory lock")
+			return false
+		}
+		dir.mu.Unlock()
+		if principal == "first" {
+			dir.upsert(noderec.DirectoryNode{HostUUID: "peer", ClusterUUID: "replacement"})
+		}
+		return true
+	})
+	if !changed || node.ClusterUUID != "replacement" || !node.Trusted {
+		t.Fatalf("applied identity = %q (trusted=%v, changed=%v), want trusted replacement", node.ClusterUUID, node.Trusted, changed)
+	}
+	if len(checked) != 2 || checked[0] != "first" || checked[1] != "replacement" {
+		t.Fatalf("trust lookups = %v, want first then replacement", checked)
+	}
+}
+
 // TestNodeInfoResponseDistinguishesAbsentFromEmpty pins the wire contract the
 // version-skew rule depends on: the pointer has to survive decoding so absent and
 // present-but-empty stay distinguishable.

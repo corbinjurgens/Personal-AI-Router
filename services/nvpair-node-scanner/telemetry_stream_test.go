@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -330,6 +331,54 @@ func TestNodeInfoStreamSupersededFrameIsNotCached(t *testing.T) {
 	f.d.applyNodeInfoFrame("peer", f.port, 7, streamFixtureFrame("peer"), func() bool { return true })
 	if _, ok := f.d.nodeInfoStreams.live["peer"]; ok {
 		t.Fatal("a frame from a stream that is no longer active was cached")
+	}
+}
+
+type frameLogLockCheck struct {
+	slog.Handler
+	check func(slog.Record)
+}
+
+func (h frameLogLockCheck) Handle(_ context.Context, r slog.Record) error {
+	h.check(r)
+	return nil
+}
+
+type closedFrameWriter struct{ eofReader }
+
+func (closedFrameWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestNodeInfoStreamLogsAfterFrameUnlock(t *testing.T) {
+	f := newStreamPeerFixture(t)
+	f.d.nodeInfoStreams.active = map[string]nodeInfoStreamHandle{"peer": {id: 7}}
+	f.d.codec = NewCodec(closedFrameWriter{})
+	frame := streamFixtureFrame("peer")
+	cluster := "new-principal"
+	frame.ClusterUUID = &cluster
+	logger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(logger) })
+	messages := make(map[string]bool)
+	slog.SetDefault(slog.New(frameLogLockCheck{
+		Handler: logger.Handler(),
+		check: func(r slog.Record) {
+			messages[r.Message] = true
+			if f.d.nodeInfoStreams.mu.TryLock() {
+				f.d.nodeInfoStreams.mu.Unlock()
+			} else {
+				t.Errorf("%q logged while holding the stream mutex", r.Message)
+			}
+			if f.d.dir.mu.TryLock() {
+				f.d.dir.mu.Unlock()
+			} else {
+				t.Errorf("%q logged while holding the directory mutex", r.Message)
+			}
+		},
+	}))
+	f.d.applyNodeInfoFrame("peer", f.port, 7, frame, func() bool { return true })
+	for _, message := range []string{"failed to emit node telemetry", "peer cluster membership changed", "failed to emit node event"} {
+		if !messages[message] {
+			t.Errorf("expected log %q", message)
+		}
 	}
 }
 

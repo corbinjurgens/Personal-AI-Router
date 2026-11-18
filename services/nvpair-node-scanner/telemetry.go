@@ -339,13 +339,25 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 	if !ok {
 		return false
 	}
-	return d.applyTelemetrySample(hostUUID, generation, buildTargetCurrent, verifiedSelf, niPort, sample)
+	d.applyTelemetrySample(hostUUID, generation, buildTargetCurrent, verifiedSelf, niPort, sample).log(hostUUID)
+	return true
+}
+
+type telemetryNotifyErrors struct {
+	node      error
+	telemetry error
+}
+
+func (e telemetryNotifyErrors) log(hostUUID string) {
+	logNodeNotifyError(noderec.NotifyNodeUpdated, e.node)
+	logTelemetryNotifyError(hostUUID, e.telemetry)
 }
 
 // applyTelemetrySample applies one node-info sample for hostUUID that was
 // read from the directory generation captured before the read, and emits its
-// telemetry. It returns false when the sample was not applied.
-func (d *daemon) applyTelemetrySample(hostUUID string, generation uint64, buildTargetCurrent, verifiedSelf bool, niPort int, sample telemetrySample) bool {
+// telemetry. The caller logs notification errors after releasing its locks.
+func (d *daemon) applyTelemetrySample(hostUUID string, generation uint64, buildTargetCurrent, verifiedSelf bool, niPort int, sample telemetrySample) telemetryNotifyErrors {
+	var notifyErrors telemetryNotifyErrors
 	info, startedAt := sample.info, sample.startedAt
 	memoryCurrent := false
 	if buildTargetCurrent {
@@ -371,7 +383,7 @@ func (d *daemon) applyTelemetrySample(hostUUID string, generation uint64, buildT
 				}
 				d.infoMu.Unlock()
 				if changed {
-					d.emit(noderec.NotifyNodeUpdated, node)
+					notifyErrors.node = d.notifyNode(noderec.NotifyNodeUpdated, node)
 				}
 			}
 		}
@@ -400,7 +412,7 @@ func (d *daemon) applyTelemetrySample(hostUUID string, generation uint64, buildT
 		ni, advertised := node.Services[noderec.ServiceNodeInfo]
 		memoryCurrent = memoryCurrent && exists && advertised && d.dir.generations[hostUUID] == generation && ni.Port == niPort
 	}
-	d.emitTelemetry(noderec.NodeTelemetry{
+	notifyErrors.telemetry = d.notifyTelemetry(noderec.NodeTelemetry{
 		MemoryRequest: func() *noderec.MemoryRequestContext {
 			if !memoryCurrent || sample.clockErr != nil {
 				return nil
@@ -419,7 +431,7 @@ func (d *daemon) applyTelemetrySample(hostUUID string, generation uint64, buildT
 		TelemetryValid:    info.TelemetryValid,
 		MSSince:           age,
 	})
-	return true
+	return notifyErrors
 }
 
 var telemetryClock = noderec.MemoryBootClock

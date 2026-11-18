@@ -350,12 +350,8 @@ func (d *directory) markDownloadsStale(hostUUID, ip string, emPort int) (noderec
 // enrichment paths own, and reports no change for an entry that already agrees so
 // the caller stays silent in the steady state.
 //
-// The two fields move together because trust is derived from the principal: a peer
-// that leaves its cluster is no longer pinned under it, so leaving one stale while
-// updating the other would describe a node that cannot exist. For the same reason
-// trust is computed here, from the principal this call settles on, rather than
-// supplied by the caller: a caller computing it from a snapshot would race the
-// other reconcile and could write back a principal that had already moved.
+// The two fields move together. Resolve trust without the directory lock,
+// then recheck the inputs before applying either field.
 //
 // A nil clusterUUID means "keep whatever is stored" — the pin-set pass re-derives
 // trust without claiming to know the principal, since only the peer's own record
@@ -364,31 +360,47 @@ func (d *directory) markDownloadsStale(hostUUID, ip string, emPort int) (noderec
 // A node that has since been evicted reports no change — there is nothing to
 // annotate, and a later rediscovery evaluates both from scratch.
 func (d *directory) applyClusterIdentity(hostUUID string, clusterUUID *string, trustFor func(clusterUUID string) bool) (node noderec.DirectoryNode, changed bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	n, present := d.nodes[hostUUID]
-	if !present {
-		return n, false
+	for {
+		d.mu.RLock()
+		n, present := d.nodes[hostUUID]
+		principal := d.clusterPrincipalLocked(n, clusterUUID)
+		generation := d.generations[hostUUID]
+		d.mu.RUnlock()
+		if !present {
+			return n, false
+		}
+		trusted := principal != "" && trustFor(principal)
+
+		d.mu.Lock()
+		n, present = d.nodes[hostUUID]
+		if !present {
+			d.mu.Unlock()
+			return n, false
+		}
+		if generation != d.generations[hostUUID] || principal != d.clusterPrincipalLocked(n, clusterUUID) {
+			d.mu.Unlock()
+			continue
+		}
+		changed := n.ClusterUUID != principal || n.Trusted != trusted
+		if changed {
+			n.ClusterUUID, n.Trusted = principal, trusted
+			d.storeLocked(n)
+		}
+		node := cloneDownloadNode(n)
+		d.mu.Unlock()
+		return node, changed
 	}
-	settled := n.ClusterUUID
-	if clusterUUID != nil {
-		settled = *clusterUUID
-	}
+}
+
+func (d *directory) clusterPrincipalLocked(n noderec.DirectoryNode, reported *string) string {
 	// Plain node-info cannot replace an authenticated claim's principal.
-	if _, authenticated := d.peerServices[hostUUID]; authenticated {
-		settled = hostUUID
+	if _, authenticated := d.peerServices[n.HostUUID]; authenticated {
+		return n.HostUUID
 	}
-	trusted := false
-	if settled != "" {
-		trusted = trustFor(settled)
+	if reported != nil {
+		return *reported
 	}
-	if n.ClusterUUID == settled && n.Trusted == trusted {
-		return cloneDownloadNode(n), false
-	}
-	n.ClusterUUID = settled
-	n.Trusted = trusted
-	d.storeLocked(n)
-	return cloneDownloadNode(n), true
+	return n.ClusterUUID
 }
 
 // applyServiceBuild updates only the diagnostic from a successful node-info

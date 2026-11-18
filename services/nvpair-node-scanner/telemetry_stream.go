@@ -45,12 +45,10 @@ const (
 // live stream. Zero-value ready.
 type nodeInfoStreamState struct {
 	// mu serializes handle replacement with the whole node-info frame apply.
-	// Acquire it before peerServicesMu, mesh lookups, d.dir.mu, infoMu and
-	// codec wgate. Telemetry's incarnation lookup releases the mesh lock before
-	// taking d.dir.mu; its build update releases d.dir.mu before infoMu.
-	// Identity's d.dir.mu -> mesh/trust lookup never calls back into scanner.
-	// Never acquire mu while holding those locks. Notify may block under mu,
-	// so broker backpressure also stalls supervision and live-cache reads.
+	// Lock order: nodeInfoStreams.mu -> peerServicesMu -> mesh lock ->
+	// d.dir.mu -> infoMu -> codec wgate. Resolve trust before directory
+	// mutation. codec.Notify is the only blocking send allowed in frame
+	// apply; log after releasing the locks.
 	mu     sync.Mutex
 	nextID uint64
 	active map[string]nodeInfoStreamHandle
@@ -139,28 +137,35 @@ func (d *daemon) supervisePeerStreams(ctx context.Context, self string, workers 
 	}
 	s := &d.nodeInfoStreams
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.reconcileLocked(ctx, &s.active, nodeInfo, workers, "node-info", d.runNodeInfoStream)
-	s.reconcileLocked(ctx, &s.models, models, workers, "models", d.runModelsStream)
+	nodeInfoOverLimit := s.reconcileLocked(ctx, &s.active, nodeInfo, workers, d.runNodeInfoStream)
+	modelsOverLimit := s.reconcileLocked(ctx, &s.models, models, workers, d.runModelsStream)
+	s.mu.Unlock()
+	for _, hostUUID := range nodeInfoOverLimit {
+		slog.Debug("peer stream limit reached", "kind", "node-info", "limit", peerStreamLimit, "host_uuid", hostUUID)
+	}
+	for _, hostUUID := range modelsOverLimit {
+		slog.Debug("peer stream limit reached", "kind", "models", "limit", peerStreamLimit, "host_uuid", hostUUID)
+	}
 }
 
 // reconcileLocked makes active hold exactly one stream per wanted host, up to
 // peerStreamLimit, each running run until its context is cancelled. Caller
 // holds s.mu.
 func (s *nodeInfoStreamState) reconcileLocked(ctx context.Context, active *map[string]nodeInfoStreamHandle, wanted map[string]bool,
-	workers *sync.WaitGroup, kind string, run func(ctx context.Context, hostUUID string, id uint64)) {
+	workers *sync.WaitGroup, run func(ctx context.Context, hostUUID string, id uint64)) []string {
 	for hostUUID, stream := range *active {
 		if !wanted[hostUUID] {
 			stream.cancel()
 			delete(*active, hostUUID)
 		}
 	}
+	var overLimit []string
 	for hostUUID := range wanted {
 		if _, running := (*active)[hostUUID]; running {
 			continue
 		}
 		if len(*active) >= peerStreamLimit {
-			slog.Debug("peer stream limit reached", "kind", kind, "limit", peerStreamLimit, "host_uuid", hostUUID)
+			overLimit = append(overLimit, hostUUID)
 			continue
 		}
 		if *active == nil {
@@ -177,6 +182,7 @@ func (s *nodeInfoStreamState) reconcileLocked(ctx context.Context, active *map[s
 			run(streamCtx, hostUUID, id)
 		}()
 	}
+	return overLimit
 }
 
 // Tests replace the factory to shorten stream reconnect timing.
@@ -300,8 +306,8 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info NodeInfoResponse, current func() bool) {
 	s := &d.nodeInfoStreams
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if stream, active := s.active[hostUUID]; !active || stream.id != id {
+		s.mu.Unlock()
 		return
 	}
 
@@ -313,7 +319,7 @@ func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info N
 	endpoint, advertised := node.Services[noderec.ServiceNodeInfo]
 	d.dir.mu.RUnlock()
 	buildTargetCurrent := exists && advertised && endpoint.Port == port
-	d.applyTelemetrySample(hostUUID, generation, buildTargetCurrent, false, port,
+	notifyErrors := d.applyTelemetrySample(hostUUID, generation, buildTargetCurrent, false, port,
 		telemetrySample{info: info, startedAt: now, boot: boot, clockErr: clockErr})
 
 	if s.live == nil {
@@ -321,7 +327,13 @@ func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info N
 	}
 	s.live[hostUUID] = liveNodeInfo{streamID: id, info: info, frameAt: now, lineAt: now, current: current}
 
-	d.applyReportedClusterIdentity(hostUUID, info.ClusterUUID)
+	node, changed, err := d.notifyReportedClusterIdentity(hostUUID, info.ClusterUUID)
+	s.mu.Unlock()
+
+	notifyErrors.log(hostUUID)
+	if changed {
+		logReportedClusterIdentity(node, err)
+	}
 }
 
 // reemitNodeInfoKeepalive re-emits the last frame's utilization as a new

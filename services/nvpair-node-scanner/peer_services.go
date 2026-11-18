@@ -271,46 +271,31 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 func (d *daemon) reconcilePeerServices() {
 	d.peerServicesMu.Lock()
 	defer d.peerServicesMu.Unlock()
-	d.dir.mu.Lock()
+	d.dir.mu.RLock()
+	claims := maps.Clone(d.dir.peerServices)
+	d.dir.mu.RUnlock()
 	var changed []noderec.DirectoryNode
 	var removed []noderec.DirectoryNode
 	var lapsed []noderec.DirectoryNode
-	for hostUUID, claim := range d.dir.peerServices {
+	for hostUUID, claim := range claims {
 		incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
 		current := admitted && incarnation == claim.Incarnation
 		if current && peerServicesFresh(claim, time.Now()) {
 			continue
 		}
-		old := d.dir.nodes[hostUUID]
+		old, browse, retired := d.retirePeerService(hostUUID)
+		if !retired {
+			continue
+		}
 		if current {
 			lapsed = append(lapsed, old)
 		}
-		delete(d.dir.peerServices, hostUUID)
-		d.dir.generations[hostUUID]++
-		if browse, exists := d.dir.browse[hostUUID]; exists {
-			browse.Trusted = d.mesh.HasPin(browse.ClusterUUID)
-			// Retire the most recently observed manager state with this route,
-			// rather than restoring an older browse snapshot as current.
-			observation := nodeDownloadObservation(old).stale()
-			if observation.snapshot == nil && observation.current == nil {
-				observation = nodeDownloadObservation(browse).stale()
-			}
-			if old.DownloadState != nil {
-				// Browse may predate an unsafe pull. Keep the latest canonical
-				// inventory rather than restoring its superseded ready names.
-				browse.Models, browse.ModelsByEngine = old.Models, old.ModelsByEngine
-				browse.ModelIdentities = noderec.CloneModelIdentities(old.ModelIdentities)
-				browse.LoadedByEngine = old.LoadedByEngine
-			}
-			browse.DownloadState, browse.DownloadStateCurrent = observation.snapshot, observation.current
-			d.dir.storeLocked(browse)
+		if browse.HostUUID != "" {
 			changed = append(changed, browse)
 		} else {
-			delete(d.dir.nodes, hostUUID)
 			removed = append(removed, old)
 		}
 	}
-	d.dir.mu.Unlock()
 	for _, node := range changed {
 		d.invalidatePeerServicesRoute(node.HostUUID)
 		d.emit(noderec.NotifyNodeUpdated, node)
@@ -327,6 +312,55 @@ func (d *daemon) reconcilePeerServices() {
 	}
 	d.reportSilentPeers(time.Now())
 	d.clearUnpairedReports()
+}
+
+// retirePeerService runs under peerServicesMu, which fences claim replacement.
+// A concurrent directory removal or browse change can still invalidate what we read.
+func (d *daemon) retirePeerService(hostUUID string) (old, restored noderec.DirectoryNode, retired bool) {
+	for {
+		d.dir.mu.RLock()
+		browse, browsed := d.dir.browse[hostUUID]
+		d.dir.mu.RUnlock()
+		trusted := browsed && d.mesh.HasPin(browse.ClusterUUID)
+
+		d.dir.mu.Lock()
+		if _, present := d.dir.peerServices[hostUUID]; !present {
+			d.dir.mu.Unlock()
+			return old, restored, false
+		}
+		latest, exists := d.dir.browse[hostUUID]
+		if exists != browsed || latest.ClusterUUID != browse.ClusterUUID {
+			d.dir.mu.Unlock()
+			continue
+		}
+		old = d.dir.nodes[hostUUID]
+		delete(d.dir.peerServices, hostUUID)
+		d.dir.generations[hostUUID]++
+		if !exists {
+			delete(d.dir.nodes, hostUUID)
+			d.dir.mu.Unlock()
+			return old, restored, true
+		}
+		browse = latest
+		browse.Trusted = trusted
+		// Retire the most recently observed manager state with this route,
+		// rather than restoring an older browse snapshot as current.
+		observation := nodeDownloadObservation(old).stale()
+		if observation.snapshot == nil && observation.current == nil {
+			observation = nodeDownloadObservation(browse).stale()
+		}
+		if old.DownloadState != nil {
+			// Browse may predate an unsafe pull. Keep the latest canonical
+			// inventory rather than restoring its superseded ready names.
+			browse.Models, browse.ModelsByEngine = old.Models, old.ModelsByEngine
+			browse.ModelIdentities = noderec.CloneModelIdentities(old.ModelIdentities)
+			browse.LoadedByEngine = old.LoadedByEngine
+		}
+		browse.DownloadState, browse.DownloadStateCurrent = observation.snapshot, observation.current
+		d.dir.storeLocked(browse)
+		d.dir.mu.Unlock()
+		return old, browse, true
+	}
 }
 
 // reportSilentPeers closes the restart gap in the lapse report above. A claim is
