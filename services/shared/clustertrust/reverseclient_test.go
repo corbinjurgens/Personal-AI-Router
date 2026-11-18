@@ -1989,6 +1989,46 @@ func TestPeerServiceClientReusesEligiblePosts(t *testing.T) {
 	test("reverse", true)
 }
 
+func TestPeerServiceClientStaleAddressKeepsAuthorizedConnection(t *testing.T) {
+	const staleAddress = "192.0.2.42:443"
+	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+		}
+		writeServiceResponse(t, w, "ok")
+	}))
+	f.adapter.opts.ReuseConnections = true
+	resolve := f.adapter.opts.ResolveRoute
+	var withdrawn atomic.Bool
+	f.adapter.opts.ResolveRouteForAddress = func(uuid string, service noderec.ServiceKey, address string) (PeerServiceRoute, bool) {
+		route, ok := resolve(uuid, service)
+		if ok && address == staleAddress && !withdrawn.Load() {
+			route.Address = address
+		}
+		return route, ok && route.Address == address
+	}
+	client := f.adapter.Client("peer", noderec.ServiceCluster)
+	stale, err := http.NewRequest(http.MethodPost, "https://"+staleAddress, strings.NewReader("mutation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withdrawn.Store(true)
+	serviceClientPost(t, client, f.url)
+	serviceClientPost(t, client, f.url)
+	f.assertDispatchConnections(t, 0, 0)
+
+	response, err := client.Do(stale)
+	if response != nil {
+		response.Body.Close()
+	}
+	var unavailable *ReverseUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("stale POST error = %v, want peer service unavailable", err)
+	}
+	serviceClientPost(t, client, f.url)
+	f.assertDispatchConnections(t, 0, 0, 0)
+}
+
 func TestPeerServiceClientIneligibleMutationsRemainFresh(t *testing.T) {
 	test := func(name, method, header string, makeBody func() io.Reader) {
 		t.Run(name, func(t *testing.T) {

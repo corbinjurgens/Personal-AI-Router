@@ -343,11 +343,14 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	}
 	identity, cfg, err := p.authority(key, req.URL.Host)
 	if err != nil {
+		// The request can outlive its published address while another
+		// address for the same service still owns an authorized pool.
 		p.mu.Lock()
-		if h := p.entries[key]; h != nil {
-			p.retireLocked(h)
-		}
+		pooled := p.entries[key]
 		p.mu.Unlock()
+		if pooled != nil {
+			_ = p.current(key, pooled.identity)
+		}
 		return nil, err
 	}
 	h := p.health(key, identity)
