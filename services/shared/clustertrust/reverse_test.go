@@ -28,6 +28,71 @@ import (
 
 const reverseTestID = "11111111111111111111111111111111"
 
+func TestReverseProbeLivePair(t *testing.T) {
+	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	reverseTestConnect(t, a, b, "a", reverseTestID)
+	if closed := a.Probe(); closed != 0 || !a.Has(ReversePeer{"b", "v1"}) {
+		t.Fatalf("live probe closed=%d, registered=%v", closed, a.Has(ReversePeer{"b", "v1"}))
+	}
+}
+
+func TestReverseProbeBlackhole(t *testing.T) {
+	m := reverseTestManager(t, ReverseOptions{LocalUUID: "b", SetupTimeout: 200 * time.Millisecond})
+	_, conn := reverseTestPingPeer(t, m, nil)
+	conn.pause(t)
+	if closed := m.Probe(); closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	if m.Has(ReversePeer{"a", "v1"}) {
+		t.Fatal("blackholed session still registered")
+	}
+}
+
+func TestReverseProbeCannotCloseReplacement(t *testing.T) {
+	m := reverseTestManager(t, ReverseOptions{LocalUUID: "b", SetupTimeout: 200 * time.Millisecond})
+	pingSent := make(chan struct{}, 1)
+	_, conn := reverseTestPingPeer(t, m, func(conn net.Conn) net.Conn {
+		return &reverseTestProbeConn{Conn: conn, ping: pingSent}
+	})
+	conn.pause(t)
+	done := make(chan int, 1)
+	go func() { done <- m.Probe() }()
+	select {
+	case <-pingSent:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not start")
+	}
+	other := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+	// A lexically earlier session ID wins the duplicate tie-break.
+	reverseTestConnect(t, other, m, "a", "00000000000000000000000000000000")
+	if closed := <-done; closed != 1 {
+		t.Fatalf("closed = %d, want captured old session", closed)
+	}
+	if !m.Has(ReversePeer{"a", "v1"}) {
+		t.Fatal("late probe closed replacement")
+	}
+	if closed := m.Probe(); closed != 0 {
+		t.Fatalf("replacement probe closed %d", closed)
+	}
+}
+
+type reverseTestProbeConn struct {
+	net.Conn
+	ping chan<- struct{}
+}
+
+func (c *reverseTestProbeConn) Write(b []byte) (int, error) {
+	// yamux ping frames have type 2; the wrapper writes each frame header.
+	if len(b) >= 12 && b[1] == 2 && b[3]&1 != 0 {
+		select {
+		case c.ping <- struct{}{}:
+		default:
+		}
+	}
+	return c.Conn.Write(b)
+}
+
 func TestReverseSessionEndBeforeRemoval(t *testing.T) {
 	type ended struct {
 		peer              ReversePeer

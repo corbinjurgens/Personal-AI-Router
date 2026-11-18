@@ -591,6 +591,35 @@ func (m *ReverseManager) Revalidate() {
 	}
 }
 
+// Probe pings every live session concurrently and closes each one whose
+// ping fails (yamux bounds a ping by ConnectionWriteTimeout to send and
+// again to wait for the reply). It returns the number closed. Sessions
+// that answer are left untouched.
+func (m *ReverseManager) Probe() int {
+	m.mu.Lock()
+	all := make([]*reverseSession, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		all = append(all, s)
+	}
+	m.mu.Unlock()
+	var closed atomic.Int64
+	var wg sync.WaitGroup
+	for _, s := range all {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.session.Ping(); err != nil {
+				s.end("probe failed")
+				s.cancel()
+				s.session.Close()
+				closed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	return int(closed.Load())
+}
+
 func (m *ReverseManager) Revoke(uuid string) {
 	m.mu.Lock()
 	s := m.sessions[uuid]
