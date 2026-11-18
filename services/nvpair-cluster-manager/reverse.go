@@ -55,9 +55,7 @@ type reverseState struct {
 	wg           sync.WaitGroup
 }
 
-// An unreachable peer is retried with exponential backoff up to 30 s
-// (peerBackoff); a repeated identical failure is still logged once and then
-// as a count each interval.
+// A repeated identical failure is logged once and then as a count each interval.
 const (
 	reverseFailureLogInterval = 30 * time.Second
 	reverseFailureLogMaxKeys  = 256
@@ -306,6 +304,14 @@ func (m *Manager) initReverse() error {
 			current, ok := m.reversePeer(peer.UUID)
 			return ok && current == peer
 		}, ResolveService: m.resolveReverseService,
+		OnSessionEnd: func(peer clustertrust.ReversePeer, uptime time.Duration, replaced bool) {
+			if replaced {
+				return
+			}
+			if node, ok := m.memberByUUID(peer.UUID); ok {
+				m.reverseBackoff.Ended(peer.UUID, m.resolvePeerAddrs(*node), uptime, time.Now())
+			}
+		},
 	})
 	if err != nil {
 		return err
@@ -626,7 +632,6 @@ func (m *Manager) reverseConnectLoop(ctx context.Context) {
 	// postpone the only reachable direction for another member. The ticker
 	// is the scheduling granularity; backoff skips peers not yet due.
 	workers := make(map[string]bool)
-	backoff := newPeerBackoff()
 	slots := make(chan struct{}, 64)
 	var workersMu sync.Mutex
 	ticker := time.NewTicker(time.Second)
@@ -637,8 +642,11 @@ func (m *Manager) reverseConnectLoop(ctx context.Context) {
 		for _, node := range nodes {
 			current[node.NodeUUID] = true
 			peer, ok := m.reversePeer(node.NodeUUID)
-			if !ok || m.reverse.manager.Has(peer) {
-				backoff.reset(node.NodeUUID)
+			if !ok {
+				m.reverseBackoff.Reset(node.NodeUUID)
+				continue
+			}
+			if m.reverse.manager.Has(peer) {
 				continue
 			}
 			workersMu.Lock()
@@ -652,7 +660,7 @@ func (m *Manager) reverseConnectLoop(ctx context.Context) {
 			// records its failure before releasing the slot, so this never
 			// reads the entry a just-finished attempt is about to replace.
 			addrs := m.resolvePeerAddrs(node)
-			if !backoff.due(node.NodeUUID, addrs, time.Now()) {
+			if !m.reverseBackoff.Due(node.NodeUUID, addrs, time.Now()) {
 				workersMu.Lock()
 				delete(workers, node.NodeUUID)
 				workersMu.Unlock()
@@ -671,14 +679,12 @@ func (m *Manager) reverseConnectLoop(ctx context.Context) {
 				defer m.reverse.wg.Done()
 				defer func() { <-slots }()
 				defer func() { workersMu.Lock(); delete(workers, node.NodeUUID); workersMu.Unlock() }()
-				if err := m.attemptReverseSession(ctx, node); err == nil {
-					backoff.reset(node.NodeUUID)
-				} else if ctx.Err() == nil {
-					backoff.failed(node.NodeUUID, addrs, time.Now())
+				if err := m.attemptReverseSession(ctx, node); err != nil && ctx.Err() == nil {
+					m.reverseBackoff.Ended(node.NodeUUID, addrs, 0, time.Now())
 				}
 			}(node)
 		}
-		backoff.retain(current)
+		m.reverseBackoff.Retain(current)
 		select {
 		case <-ctx.Done():
 			return

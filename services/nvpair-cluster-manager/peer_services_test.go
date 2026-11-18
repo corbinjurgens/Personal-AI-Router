@@ -157,7 +157,22 @@ func streamPeerStateOnce(ctx context.Context, m *Manager, uuid string) error {
 		return errors.New("no current admission")
 	}
 	gotFrame, err := m.runPeerStateStream(ctx, uuid, incarnation)
-	if err == nil && !gotFrame {
+	// The frame schedules reconciliation asynchronously. Drain the fixture's
+	// no-op before a later call replaces its hook.
+	deadline := time.Now().Add(time.Second)
+	for {
+		m.serviceRefresh.mu.Lock()
+		pending := len(m.serviceRefresh.reconcileInflight) != 0
+		m.serviceRefresh.mu.Unlock()
+		if !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			return errors.New("fixture reconciliation did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err == nil && !gotFrame.gotFrame {
 		return errors.New("peer-state stream ended without a frame")
 	}
 	return err
@@ -167,11 +182,20 @@ func streamPeerStateOnce(ctx context.Context, m *Manager, uuid string) error {
 type cancelAfterFlush struct {
 	http.ResponseWriter
 	cancel context.CancelFunc
+	wrote  bool
 }
 
-func (c cancelAfterFlush) Flush() {
+func (c *cancelAfterFlush) Write(p []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(p)
+	c.wrote = c.wrote || n > 0
+	return n, err
+}
+
+func (c *cancelAfterFlush) Flush() {
 	c.ResponseWriter.(http.Flusher).Flush()
-	c.cancel()
+	if c.wrote {
+		c.cancel()
+	}
 }
 
 // servePeerStateOnce serves m's real peer-state handler but ends the stream
@@ -180,7 +204,7 @@ func servePeerStateOnce(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
-		m.handlePeerState(cancelAfterFlush{ResponseWriter: w, cancel: cancel}, r.WithContext(ctx))
+		m.handlePeerState(&cancelAfterFlush{ResponseWriter: w, cancel: cancel}, r.WithContext(ctx))
 	}
 }
 
@@ -1564,7 +1588,8 @@ func (p *peerStateStreamPair) run(ctx context.Context) (bool, error) {
 	if !ok {
 		return false, errors.New("no current admission")
 	}
-	return p.a.runPeerStateStream(ctx, p.b.identity.NodeUUID, incarnation)
+	read, err := p.a.runPeerStateStream(ctx, p.b.identity.NodeUUID, incarnation)
+	return read.gotFrame, err
 }
 
 func TestPeerStateStreamOutlivesClientTimeout(t *testing.T) {
@@ -1790,12 +1815,16 @@ func TestPeerStateForbiddenRequestsReconcilePass(t *testing.T) {
 	})
 }
 
-func TestPeerStateReachableEvidenceResetsBackoff(t *testing.T) {
+func TestPeerStateReachableEvidenceExpeditesBackoff(t *testing.T) {
 	// Start where a long outage leaves the backoff: the next retry 30 s out.
 	previous := newPeerStateBackoff
-	newPeerStateBackoff = func() *peerBackoff {
-		b := newPeerBackoff()
-		b.initial, b.jitter = 30*time.Second, func() float64 { return 1 }
+	newPeerStateBackoff = func() *clustertrust.PeerBackoff {
+		b := clustertrust.NewPeerBackoff()
+		b.NewRetry = func() *clustertrust.PeerRetry {
+			r := clustertrust.NewMemberRetry()
+			r.Initial, r.Jitter = 30*time.Second, func() float64 { return 1 }
+			return r
+		}
 		return b
 	}
 	t.Cleanup(func() { newPeerStateBackoff = previous })
@@ -1873,5 +1902,47 @@ func TestPeerStateReachableEvidenceResetsBackoff(t *testing.T) {
 	}
 	if len(p.claims.claims(t)) == 0 {
 		t.Fatal("redialed stream delivered no frame")
+	}
+}
+
+func TestReachableEvidenceKeepsPeerStateFailureHistory(t *testing.T) {
+	p := newPeerStateStreamPair(t, func(_ *peerStateStreamPair, w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	})
+	p.a.peerStateBackoff.NewRetry = func() *clustertrust.PeerRetry {
+		r := clustertrust.NewMemberRetry()
+		r.Jitter = func() float64 { return 1 }
+		return r
+	}
+	uuid := p.b.identity.NodeUUID
+	member, ok := p.a.memberByUUID(uuid)
+	if !ok {
+		t.Fatal("member missing")
+	}
+	addrs := p.a.resolvePeerAddrs(*member)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.a.peerStateLoop(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitFailure := func(want int32, delay time.Duration) {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			if p.requests.Load() >= want && !p.a.peerStateBackoff.Due(uuid, addrs, time.Now().Add(delay-time.Second)) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("failure %d was not scheduled with delay %v (requests %d)", want, delay, p.requests.Load())
+	}
+	waitFailure(3, 4*time.Second)
+	start := time.Now()
+	p.a.notePeerReachable(uuid)
+	waitFailure(4, 8*time.Second)
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Fatalf("reachability retry took %v", elapsed)
+	}
+	if !p.a.peerStateBackoff.Due(uuid, addrs, time.Now().Add(9*time.Second)) {
+		t.Fatal("next failure did not retain the 8s ladder step")
 	}
 }

@@ -57,6 +57,8 @@ type Manager struct {
 	peerServices         *clustertrust.PeerServiceClient
 	removalPeerServices  *clustertrust.PeerServiceClient
 	peerStateStreams     *clustertrust.PeerServiceClient // no total timeout; streams only
+	reverseBackoff       *clustertrust.PeerBackoff
+	peerStateBackoff     *clustertrust.PeerBackoff
 	peerRoutesMu         sync.Mutex
 	peerRoutes           map[string]clusterPeerRoute
 	serviceRefresh       peerServicesState
@@ -299,6 +301,8 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		peerStateSignal:   make(chan struct{}, 1),
 		peerStateMembers:  make(chan struct{}, 1),
 		peerReachableWake: make(chan struct{}, 1),
+		reverseBackoff:    clustertrust.NewPeerBackoff(),
+		peerStateBackoff:  newPeerStateBackoff(),
 	}
 	mgr.initSelfName(storedIdentity)
 	log.Printf("node identity %s name %s fingerprint %s", identity.NodeUUID, mgr.selfName(), identity.CertFingerprint)

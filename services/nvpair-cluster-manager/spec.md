@@ -946,11 +946,17 @@ changed frame, and a `null` keepalive every 10 s. One manager-level publisher
 rebuilds the frame 250 ms after a change signal and every 10 s and publishes it
 only when it changed. Pin, admission and availability are rechecked before every
 line; the subscriber drops a stream after 25 s without a line and reconnects
-with per-member exponential backoff (1 s doubling to 30 s, with jitter). Evidence
+with the shared per-member exponential backoff (1 s doubling to 30 s, with
+uniform jitter in [0.8, 1.2]). After 10 min of continuous failure the cap grows
+to 5 min by doubling the previous capped delay. Only 30 s of healthy stream
+time (first accepted frame to last received line) resets the ladder, and the
+next retry still waits the initial delay. Evidence
 that the member is reachable again (a reverse session in either direction, an
 authenticated inbound peer-state or roster request from it, or an accepted
-roster exchange with it) resets that backoff and redials at once, so the cap
-applies only while the member stays unreachable. The trusted mux serves only its own descriptor: canonical local UUID,
+roster exchange with it) makes a retry due at once without clearing failure
+history. Reverse sessions use the same member schedule, measuring health from
+registration to close; connecting alone never resets it. A duplicate replacement
+does not advance the ladder. The trusted mux serves only its own descriptor: canonical local UUID,
 display name and ranked addresses from the scanner's registry-owned self row,
 with a complete service/port snapshot from current broker registrations.
 An uninitialized registry or missing self row returns unavailable. An initialized
@@ -979,8 +985,8 @@ identity are required before publishing anything. The serving endpoint requires
 current mutual admission and the exact pinned requester certificate.
 
 Each member has at most one peer-state stream open; a stream that fails or
-ends is reopened with the member's reconnect backoff (1 s doubling to 30 s,
-with jitter). The original shared Mesh incarnation (both certificates and
+ends is reopened with the shared member reconnect backoff described above.
+The original shared Mesh incarnation (both certificates and
 admission epochs) is captured before the stream opens and checked again
 before each frame's descriptor is committed.
 The manager emits private `cluster:peer-services` metadata with that original

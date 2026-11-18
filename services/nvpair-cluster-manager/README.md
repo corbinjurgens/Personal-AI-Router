@@ -735,7 +735,10 @@ overwriting authenticated services. Valid service omission withdraws that
 service. Admission changes immediately invalidate old authority; unavailable
 routes do not renew the bounded metadata lifetime or remove membership.
 
-One stream per member stays open; reconnects use the member's backoff and
+One stream per member stays open; reconnects use the shared member backoff
+(jittered 1 s doubling to 30 s, growing to 5 min after 10 min of continuous
+failure, reset only after 30 s healthy). Reachability evidence expedites a retry
+without clearing failure history. Reconnects
 cover startup, restored admission, reverse availability and worker
 replacement. Each frame is bounded in size, and complete validation precedes
 atomic scanner application. Details and

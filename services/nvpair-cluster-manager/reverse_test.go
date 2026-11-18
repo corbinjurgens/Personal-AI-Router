@@ -398,6 +398,50 @@ func newReverseTestManager(t *testing.T) *Manager {
 	return manager
 }
 
+func TestReverseDialBacksOffAfterShortSessions(t *testing.T) {
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	startReverseHTTP(t, b, false)
+	pairReverseManagers(t, a, b)
+	a.reverseBackoff.NewRetry = func() *clustertrust.PeerRetry {
+		r := clustertrust.NewMemberRetry()
+		r.Jitter = func() float64 { return 1 }
+		return r
+	}
+	peer, ok := a.reversePeer(b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("missing admitted peer")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.reverse.wg.Add(1)
+	go a.reverseConnectLoop(ctx)
+	defer func() { cancel(); a.reverse.wg.Wait() }()
+	waitPresent := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(6 * time.Second)
+		for a.reverse.manager.Has(peer) != want && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if a.reverse.manager.Has(peer) != want {
+			t.Fatalf("session present != %v", want)
+		}
+	}
+	waitPresent(true)
+	for _, delay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		// Cross a supervisor tick while connected, which used to erase history.
+		time.Sleep(1100 * time.Millisecond)
+		closed := time.Now()
+		b.reverse.manager.Revoke(a.identity.NodeUUID)
+		waitPresent(false)
+		for time.Since(closed) < delay {
+			if a.reverse.manager.Has(peer) {
+				t.Fatalf("redial after %v, want >= %v", time.Since(closed), delay)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		waitPresent(true)
+	}
+}
+
 func pairReverseManagers(t *testing.T, a, b *Manager) {
 	t.Helper()
 	pin := func(local, remote *Manager) {
