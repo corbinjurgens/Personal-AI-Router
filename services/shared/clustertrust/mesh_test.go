@@ -4,13 +4,61 @@
 package clustertrust
 
 import (
+	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestMeshVerifyPeerAddress(t *testing.T) {
+	selfPEM, selfKey, _ := genLeaf(t, "self")
+	peerPEM, peerKey, _ := genLeaf(t, "peer")
+	wrongPEM, wrongKey, _ := genLeaf(t, "wrong")
+	self := loadMeshDir(t, selfPEM, selfKey, map[string]string{"peer": string(peerPEM)})
+	peer := loadMeshDir(t, peerPEM, peerKey, map[string]string{"self": string(selfPEM)})
+	wrong := loadMeshDir(t, wrongPEM, wrongKey, map[string]string{"self": string(selfPEM)})
+	listen := func(mesh *Mesh) *httptest.Server {
+		t.Helper()
+		s := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Error("verification sent application data")
+		}))
+		s.TLS = mesh.ServerTLSConfig()
+		s.StartTLS()
+		t.Cleanup(s.Close)
+		return s
+	}
+	peerServer, wrongServer := listen(peer), listen(wrong)
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAddress := closed.Addr().String()
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, key, address string
+		wantError          bool
+	}{
+		{"right peer", "peer", peerServer.Listener.Addr().String(), false},
+		{"wrong certificate", "peer", wrongServer.Listener.Addr().String(), true},
+		{"closed port", "peer", closedAddress, true},
+		{"no pin", "unknown", peerServer.Listener.Addr().String(), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := self.VerifyPeerAddress(ctx, tc.key, tc.address); (err != nil) != tc.wantError {
+				t.Fatalf("VerifyPeerAddress error = %v, want error = %v", err, tc.wantError)
+			}
+		})
+	}
+}
 
 // writeIdentity drops a node.crt/node.key keypair into dir so a Mesh opened on
 // it finds an identity there. (genLeaf + writePin come from clustertrust_test.go.)
