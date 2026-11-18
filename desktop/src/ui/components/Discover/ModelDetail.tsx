@@ -106,7 +106,7 @@ export function ModelDetail({
                 )}
             </Flex>
 
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
                 <StatTile label="Downloads" value={formatCompactCount(model.downloads)} />
                 <StatTile label="Likes" value={formatCompactCount(model.likes)} />
                 <StatTile label="Parameters" value={parameters ?? 'Not stated'} />
@@ -133,8 +133,10 @@ export function ModelDetail({
             )}
 
             <Stack gap="2">
-                <Flex align="baseline" justify="between" gap="2">
-                    <Text kind="body/semibold/md">Choose a quantization</Text>
+                <Flex align="baseline" justify="between" gap="2" wrap="wrap">
+                    <Text kind="body/semibold/md" className="whitespace-nowrap">
+                        Choose a quantization
+                    </Text>
                     <Text kind="body/regular/xs" className="text-subtle-color">
                         Smaller files use less memory; larger ones keep more quality.
                     </Text>
