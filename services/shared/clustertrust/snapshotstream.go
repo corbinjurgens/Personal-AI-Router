@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -227,6 +228,9 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 			return outcome, context.Canceled
 		}
 		if err := c.OnFrame(value); err != nil {
+			if cancelErr := ctx.Err(); cancelErr != nil && errors.Is(err, cancelErr) {
+				return outcome, err
+			}
 			outcome.End = StreamEndRefused
 			return outcome, err
 		}

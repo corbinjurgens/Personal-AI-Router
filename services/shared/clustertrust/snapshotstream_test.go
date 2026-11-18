@@ -697,6 +697,26 @@ func TestSnapshotStreamOutcome(t *testing.T) {
 	}
 }
 
+func TestSnapshotStreamFrameCancelledByReplacement(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	called := false
+	out, err := ReadSnapshotStream(ctx, cancel, strings.NewReader("{}\n"), SnapshotStreamClient[streamFrame]{
+		Kind: "node-info", Peer: "peer", Idle: time.Second, MaxLine: 4096,
+		Current: func() bool { return true },
+		Decode:  func([]byte) (streamFrame, error) { return streamFrame{}, nil },
+		OnFrame: func(streamFrame) error {
+			called = true
+			// Replacement cancels the old stream after the reader's last
+			// context check but before the frame passes the callback's fence.
+			cancel()
+			return context.Canceled
+		},
+	})
+	if !called || !errors.Is(err, context.Canceled) || out.End != StreamEndCancelled {
+		t.Fatalf("callback called = %v, end = %s, err = %v, want true, cancelled, context.Canceled", called, out.End, err)
+	}
+}
+
 func TestSnapshotStreamHealthyExcludesTrailingSilence(t *testing.T) {
 	ctx, cancel, response := openStream(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintln(w, "{}")
