@@ -128,11 +128,18 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		copyJournal:  exec.downloads,
 		copyRegistry: exec.reg,
 		peers:        newPeerDirectory(),
-		addrs:        reach.NewChooser(),
 		mesh:         mesh,
 		catalog:      newCatalogService(),
 		cancel:       func() {},
 	}
+	m.addrs = reach.NewChooser(reach.WithChanged(m.peerChanges), reach.WithVerify(func(ctx context.Context, key, address string) error {
+		peer, ok := m.peers.lookup(key)
+		if !ok {
+			return fmt.Errorf("peer %q unavailable", key)
+		}
+		m.mesh.Refresh()
+		return m.mesh.VerifyPeerAddress(ctx, peer.clusterUUID, address)
+	}))
 	m.copyPrepare = m.prepareCopy
 	m.catalog.familyOf = exec.reg.familyOf
 	baseDir := ""

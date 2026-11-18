@@ -108,11 +108,20 @@ func NewPeerSync(mgr *Manager, mesh *clustertrust.Mesh, clusterDir string) *Peer
 		localNodeID: mgr.LocalNodeID(),
 		mesh:        mesh,
 		clusterDir:  clusterDir,
-		addrs:       reach.NewChooser(),
 		discovered:  make(map[string]RawNode),
 		peers:       make(map[string]peerTarget),
 		resubscribe: make(chan struct{}, 1),
 	}
+	ps.addrs = reach.NewChooser(reach.WithChanged(ps.peerChanges), reach.WithVerify(func(ctx context.Context, key, address string) error {
+		ps.mu.RLock()
+		peer, ok := ps.peers[key]
+		ps.mu.RUnlock()
+		if !ok {
+			return fmt.Errorf("peer %q unavailable", key)
+		}
+		ps.mesh.Refresh()
+		return ps.mesh.VerifyPeerAddress(ctx, peer.uuid, address)
+	}))
 	baseDir := ""
 	if clusterDir != "" {
 		baseDir = filepath.Dir(filepath.Clean(clusterDir))
@@ -370,7 +379,7 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 			// A transport failure retires the address, so the next attempt
 			// confirms the peer's list again. A response, even a refusal, means
 			// the address is fine.
-			ps.addrs.Forget(nodeID)
+			ps.addrs.ForgetAddr(nodeID, hostport)
 			slog.Warn("errors stream connect failed", "nodeId", nodeID, "url", url, "err", err)
 		}
 		return 0

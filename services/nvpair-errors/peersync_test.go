@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,7 +18,38 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
+	"nvpair-shared/reach"
 )
+
+func TestPeerSyncLateFailureKeepsNewerAddress(t *testing.T) {
+	f := newErrorSyncFixture(t)
+	ps := f.ps
+	ps.addrs = reach.NewChooser(reach.WithDial(func(string, string, time.Duration) (net.Conn, error) {
+		left, right := net.Pipe()
+		right.Close()
+		return left, nil
+	}))
+	old := f.expectedHost
+	newer := "192.0.2.22:14321"
+	candidates := []string{old, newer}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ps.peers["node-b"] = peerTarget{uuid: "node-b", candidates: candidates, stream: 1, cancel: cancel}
+	f.beforeDial = func() {
+		ps.addrs.Forget("node-b")
+		if got := ps.addrs.ChooseWithin(context.Background(), "node-b", []string{newer, old}); got != newer {
+			t.Errorf("new choice = %q", got)
+		}
+	}
+	f.blocked.Store(true)
+	ps.streamOnce(ctx, "node-b", 1)
+	if f.directCalls.Load() == 0 {
+		t.Fatal("stream did not attempt old endpoint")
+	}
+	if got := ps.addrs.ChooseWithin(context.Background(), "node-b", candidates); got != newer {
+		t.Fatalf("late stream failure retired newer address: %q", got)
+	}
+}
 
 func TestErrorsPeerStreamReconnectsAfterChange(t *testing.T) {
 	f := newErrorSyncFixtureRetry(t, time.Hour)

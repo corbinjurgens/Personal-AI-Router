@@ -1072,7 +1072,7 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 				if owner == nil {
 					owner = f
 				}
-				owner.targets.Forget(cand.id)
+				owner.targets.ForgetAddr(cand.id, cand.url.Host)
 				if !last {
 					retry = true
 					return

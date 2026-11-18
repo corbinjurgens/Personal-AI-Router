@@ -151,7 +151,7 @@ func (f *facade) catalogPermissions(r *http.Request, matchedRoute route, candida
 				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 			resp, err := client.Do(req)
 			if err != nil {
-				f.targets.Forget(cand.id)
+				f.targets.ForgetAddr(cand.id, cand.url.Host)
 				return
 			}
 			defer resp.Body.Close()

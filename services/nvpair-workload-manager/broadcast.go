@@ -61,8 +61,17 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 	b := &Broadcaster{
 		peers: peers,
 		mesh:  mesh,
-		addrs: reach.NewChooser(),
 	}
+	b.addrs = reach.NewChooser(reach.WithChanged(b.peerChanges), reach.WithVerify(func(ctx context.Context, key, address string) error {
+		peers.mu.RLock()
+		peer, ok := peers.peers[key]
+		peers.mu.RUnlock()
+		if !ok {
+			return fmt.Errorf("peer %q unavailable", key)
+		}
+		b.mesh.Refresh()
+		return b.mesh.VerifyPeerAddress(ctx, peer.uuid, address)
+	}))
 	b.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
 		BaseConfigDir:     peerConfigBase(clusterDir),
@@ -187,7 +196,7 @@ func (b *Broadcaster) deliver(ctx context.Context, t target, frame []byte) {
 		}
 		var statusErr *httpStatusError
 		if !errors.As(err, &statusErr) {
-			b.addrs.Forget(t.id)
+			b.addrs.ForgetAddr(current.id, hostport)
 		}
 		slog.Warn("broadcast attempt failed",
 			"url", url, "attempt", attempt, "max", maxBroadcastAttempts, "err", err)

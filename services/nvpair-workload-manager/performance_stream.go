@@ -247,7 +247,8 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) ti
 		_, nowGeneration, routed := b.peers.targetUUID(uuid)
 		return admitted && routed && now == identity && nowGeneration == generation
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+b.addrs.Prefer(t.id, t.candidates)+performanceStreamPath, nil)
+	hostport := b.addrs.Prefer(t.id, t.candidates)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+hostport+performanceStreamPath, nil)
 	if err != nil {
 		return 0
 	}
@@ -255,7 +256,7 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) ti
 	resp, err := p.streams.Client(uuid, noderec.ServiceWorkload).Do(req)
 	connect.Stop()
 	if err != nil {
-		b.addrs.Forget(t.id)
+		b.addrs.ForgetAddr(t.id, hostport)
 		return 0
 	}
 	defer resp.Body.Close()

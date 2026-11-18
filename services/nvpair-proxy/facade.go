@@ -170,13 +170,24 @@ func (f *facade) peerEndpoint(uuid string) (proxyPeerEndpoint, bool) {
 }
 
 func newFacade(host *Proxy, profile engineProfile, discovery *Discovery, port int) *facade {
-	return &facade{
+	f := &facade{
 		host:      host,
 		profile:   profile,
 		discovery: discovery,
 		port:      port,
-		targets:   reach.NewChooser(),
 	}
+	f.targets = reach.NewChooser(reach.WithChanged(host.peerChanges), reach.WithVerify(func(ctx context.Context, key, address string) error {
+		for _, node := range f.discovery.Nodes() {
+			if node.ID == key && node.ClusterUUID != "" {
+				host.mesh.Refresh()
+				return host.mesh.VerifyPeerAddress(ctx, node.ClusterUUID, address)
+			}
+		}
+		// Plain manual/self engine endpoints have no peer identity handshake.
+		// They cannot be promoted by a TCP acceptance alone.
+		return fmt.Errorf("target %q has no pinned peer verifier", key)
+	}))
+	return f
 }
 
 // enableFacadeParams is the broker's request to bring one engine's facade up.
