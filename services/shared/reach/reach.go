@@ -171,6 +171,8 @@ type returnToken struct {
 	generation   uint64
 	fingerprint  string
 	networkEpoch uint64
+	cancel       context.CancelFunc
+	invalidated  bool
 }
 
 // choice is the address chosen for a node plus the candidate list it was chosen
@@ -474,7 +476,7 @@ func (c *Chooser) Forget(key string) {
 func (c *Chooser) forget(key string) {
 	delete(c.cache, key)
 	delete(c.probing, key)
-	delete(c.returning, key)
+	c.invalidateReturn(key)
 	delete(c.nextReturn, key)
 	c.generation[key]++
 }
@@ -499,7 +501,7 @@ func (c *Chooser) ForgetAddr(key, address string) {
 		// reported address and let a later call reserve a fresh check.
 		c.generation[key]++
 		delete(c.probing, key)
-		delete(c.returning, key)
+		c.invalidateReturn(key)
 	}
 	c.markSuspect(key, address)
 }
@@ -514,6 +516,16 @@ func (c *Chooser) markSuspect(key, address string) {
 	c.suspect[key][address] = c.now().Add(SuspectFor)
 }
 
+// invalidateReturn fences the result and asks the check to stop. The worker
+// owns releasing the reservation, even if verification is slow to cancel.
+// The caller holds c.mu.
+func (c *Chooser) invalidateReturn(key string) {
+	if token := c.returning[key]; token != nil {
+		token.invalidated = true
+		token.cancel()
+	}
+}
+
 // observe is called with c.mu held, even for empty or singleton lists, so they
 // also fence a check reserved against an older publication.
 func (c *Chooser) observe(key, fingerprint string) {
@@ -522,7 +534,7 @@ func (c *Chooser) observe(key, fingerprint string) {
 		c.published = make(map[string]string)
 	}
 	if previous, ok := c.published[key]; ok && previous != fingerprint {
-		delete(c.returning, key)
+		c.invalidateReturn(key)
 	}
 	c.published[key] = fingerprint
 }
@@ -537,7 +549,9 @@ func (c *Chooser) observeChange() {
 		c.networkEpoch++
 		clear(c.suspect)
 		clear(c.nextReturn)
-		clear(c.returning)
+		for key := range c.returning {
+			c.invalidateReturn(key)
+		}
 	default:
 	}
 }
@@ -562,21 +576,25 @@ func (c *Chooser) startReturn(key string, candidates []string) {
 		c.returning = make(map[string]*returnToken)
 		c.nextReturn = make(map[string]time.Time)
 	}
-	token := &returnToken{c.generation[key], e.fingerprint, c.networkEpoch}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	token := &returnToken{generation: c.generation[key], fingerprint: e.fingerprint, networkEpoch: c.networkEpoch, cancel: cancel}
 	c.returning[key] = token
-	go c.checkReturn(key, e.address, better, token)
+	go c.checkReturn(ctx, key, e.address, better, token)
 }
 
-func (c *Chooser) checkReturn(key, old string, candidates []string, token *returnToken) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func (c *Chooser) checkReturn(ctx context.Context, key, old string, candidates []string, token *returnToken) {
+	defer token.cancel()
+	deadline, _ := ctx.Deadline()
 	var winner string
 	var failed []string
 	for _, candidate := range candidates {
-		if ctx.Err() != nil {
+		remaining := time.Until(deadline)
+		if ctx.Err() != nil || remaining <= 0 {
 			break
 		}
-		if _, ok := first(ctx, c.dial, []string{candidate}, c.timeout); !ok {
+		// Keep the reservation through the finite TCP probe too, including
+		// when cancellation arrives while the probe is waiting at the socket.
+		if !accepts(c.dial, candidate, min(c.timeout, remaining)) || ctx.Err() != nil {
 			continue
 		}
 		if err := c.verify(ctx, key, candidate); err != nil {
@@ -595,7 +613,7 @@ func (c *Chooser) checkReturn(key, old string, candidates []string, token *retur
 		return
 	}
 	delete(c.returning, key)
-	if c.generation[key] != token.generation || c.published[key] != token.fingerprint || c.networkEpoch != token.networkEpoch {
+	if token.invalidated || c.generation[key] != token.generation || c.published[key] != token.fingerprint || c.networkEpoch != token.networkEpoch {
 		return
 	}
 	for _, candidate := range failed {

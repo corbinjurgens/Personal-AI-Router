@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -1025,15 +1026,7 @@ func TestReturnDiscardsStaleChecks(t *testing.T) {
 			unblock := func() { once.Do(func() { close(release) }) }
 			t.Cleanup(unblock)
 			candidates := []string{returnLAN, returnVPN}
-			c.mu.Lock()
-			token := &returnToken{c.generation["peer"], c.cache["peer"].fingerprint, c.networkEpoch}
-			c.returning["peer"] = token
-			c.mu.Unlock()
-			finished := make(chan struct{})
-			go func() {
-				defer close(finished)
-				c.checkReturn("peer", returnVPN, candidates[:1], token)
-			}()
+			choose(c, "peer", candidates)
 			select {
 			case <-entered:
 			case <-time.After(time.Second):
@@ -1041,11 +1034,7 @@ func TestReturnDiscardsStaleChecks(t *testing.T) {
 			}
 			invalidate(c, changes)
 			unblock()
-			select {
-			case <-finished:
-			case <-time.After(time.Second):
-				t.Fatal("old check did not finish")
-			}
+			waitReturn(t, c)
 			c.mu.Lock()
 			address := c.cache["peer"].address
 			c.mu.Unlock()
@@ -1060,38 +1049,55 @@ func TestReturnDiscardsStaleChecks(t *testing.T) {
 }
 
 func TestConcurrentCallsSingleFlightReturn(t *testing.T) {
-	entered, release := make(chan struct{}, 10), make(chan struct{})
-	var checks atomic.Int32
-	c, changes := returnChooser(t, func(context.Context, string, string) error {
-		checks.Add(1)
-		entered <- struct{}{}
-		<-release
-		return nil
+	synctest.Test(t, func(t *testing.T) {
+		entered, release := make(chan context.Context, 3), make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		var checks atomic.Int32
+		c, changes := returnChooser(t, func(ctx context.Context, _, _ string) error {
+			number := checks.Add(1)
+			entered <- ctx
+			if number == 1 {
+				<-release
+			}
+			return nil
+		})
+		candidates := []string{returnLAN, returnVPN}
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Go(func() { choose(c, "peer", candidates) })
+		}
+		wg.Wait()
+		synctest.Wait()
+		var first context.Context
+		select {
+		case first = <-entered:
+		default:
+			t.Fatal("check did not start")
+		}
+		if got := checks.Load(); got != 1 {
+			t.Fatalf("concurrent calls started %d checks, want 1", got)
+		}
+		changes.fire()
+		choose(c, "peer", candidates)
+		synctest.Wait()
+		if got := checks.Load(); got != 1 {
+			t.Fatalf("network change started %d checks before the first verifier exited, want 1", got)
+		}
+		if !errors.Is(first.Err(), context.Canceled) {
+			t.Errorf("obsolete verifier context error = %v, want cancelled", first.Err())
+		}
+		unblock()
+		synctest.Wait()
+		if got := choose(c, "peer", candidates); got != returnVPN {
+			t.Errorf("obsolete verifier changed the route to %q", got)
+		}
+		synctest.Wait()
+		if got := checks.Load(); got != 2 {
+			t.Errorf("checks after obsolete verifier exited = %d, want 2", got)
+		}
+		if got := choose(c, "peer", candidates); got != returnLAN {
+			t.Errorf("route after new verification = %q, want %q", got, returnLAN)
+		}
 	})
-	defer close(release)
-	var wg sync.WaitGroup
-	for range 2 {
-		wg.Go(func() { choose(c, "peer", []string{returnLAN, returnVPN}) })
-	}
-	wg.Wait()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("check did not start")
-	}
-	if checks.Load() != 1 {
-		t.Fatalf("concurrent calls started %d checks", checks.Load())
-	}
-	// A network change releases only the old epoch's reservation. A new check
-	// may start without waiting for the obsolete verification to return.
-	changes.fire()
-	choose(c, "peer", []string{returnLAN, returnVPN})
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("network change did not allow a new check")
-	}
-	if checks.Load() != 2 {
-		t.Fatalf("checks after change = %d, want 2", checks.Load())
-	}
 }
