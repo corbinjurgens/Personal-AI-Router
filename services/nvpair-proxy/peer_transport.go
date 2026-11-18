@@ -19,7 +19,28 @@ func (p *Proxy) candidateTransport(c candidate) http.RoundTripper {
 	if c.peerUUID == "" {
 		return p.plainHTTPTransport()
 	}
-	return p.peerServiceClient().Client(c.peerUUID, c.fac.profile.DiscoveryService).Transport
+	return proxyPeerDispatch{
+		RoundTripper: p.peerServiceClient().Client(c.peerUUID, c.fac.profile.DiscoveryService).Transport,
+		facade:       c.fac,
+		uuid:         c.peerUUID,
+		nodeID:       c.id,
+	}
+}
+
+type proxyPeerDispatch struct {
+	http.RoundTripper
+	facade *facade
+	uuid   string
+	nodeID string
+}
+
+func (d proxyPeerDispatch) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Context().Err() == nil {
+		if endpoint, ok := d.facade.peerEndpoint(d.uuid); ok && endpoint.nodeID == d.nodeID {
+			d.facade.targets.Prefer(d.nodeID, endpoint.addresses)
+		}
+	}
+	return d.RoundTripper.RoundTrip(req)
 }
 
 func newProxyTransport() *http.Transport {

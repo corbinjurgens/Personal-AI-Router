@@ -147,7 +147,7 @@ func (f *facade) refreshPeerEndpointsLocked() {
 			continue
 		}
 		endpoint := proxyPeerEndpoint{nodeID: n.ID, addresses: addresses,
-			selected: f.targets.Prefer(n.ID, addresses)}
+			selected: f.targets.PreferCached(n.ID, addresses)}
 		previous, exists := f.peerEndpoints[n.ClusterUUID]
 		if exists && previous.nodeID == endpoint.nodeID &&
 			slices.Equal(previous.addresses, addresses) && previous.selected == endpoint.selected {
@@ -396,7 +396,7 @@ func (f *facade) clearSelectionIfNotPresent() {
 
 // targetURL resolves a node to the address this facade should dial.
 //
-// reach.Prefer, not a blocking confirmation: this runs once per discovered node
+// reach.PreferCached, not a blocking confirmation: this runs once per discovered node
 // per request, including nodes this request will not be routed to, so a
 // handshake here would charge every request for every node's connectivity. An
 // address that is wrong is caught by the reverse proxy's ErrorHandler, which
@@ -406,7 +406,7 @@ func (f *facade) targetURL(n Node) *url.URL {
 	if len(candidates) == 0 {
 		return nil
 	}
-	host := f.targets.Prefer(n.ID, candidates)
+	host := f.targets.PreferCached(n.ID, candidates)
 	return &url.URL{Scheme: "http", Host: host}
 }
 

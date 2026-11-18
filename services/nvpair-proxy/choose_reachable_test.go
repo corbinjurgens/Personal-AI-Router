@@ -53,27 +53,19 @@ func TestProxyLateFailureKeepsNewerAddress(t *testing.T) {
 	}
 }
 
-func TestProxyLaterRequestUsesVerifiedReturnAfterChange(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[]}`))
+func TestProxyReturnStartsOnlyAtPeerDispatch(t *testing.T) {
+	fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer server.Close()
-	n := nodeForModel(t, "peer", server.URL, "llama")
-	n.Addresses = []string{"100.64.1.2", "192.168.1.2"}
-	disc := NewDiscovery()
-	disc.AddManual(n)
-	p := testProxy(anyProfile(t), disc, 11435)
-	f := p.soleFacade()
+	p, f := fx.p, fx.p.soleFacade()
+	n := fx.node
+	n.Addresses = []string{"192.168.1.2", "100.64.1.2"}
 	var lanReady atomic.Bool
-	var checks atomic.Int32
-	var mu sync.Mutex
-	ch := make(chan struct{})
-	f.targets = reach.NewChooser(reach.WithChanged(func() <-chan struct{} {
-		mu.Lock()
-		defer mu.Unlock()
-		return ch
-	}), reach.WithDial(func(_, address string, _ time.Duration) (net.Conn, error) {
+	checked := make(chan string, 2)
+	wait := make(chan struct{})
+	release := sync.OnceFunc(func() { close(wait) })
+	t.Cleanup(release)
+	f.targets = reach.NewChooser(reach.WithDial(func(_, address string, _ time.Duration) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil || (host == "192.168.1.2" && !lanReady.Load()) {
 			return nil, net.ErrClosed
@@ -81,31 +73,40 @@ func TestProxyLaterRequestUsesVerifiedReturnAfterChange(t *testing.T) {
 		left, right := net.Pipe()
 		right.Close()
 		return left, nil
-	}), reach.WithVerify(func(_ context.Context, key, address string) error {
-		if key != n.ID || address != net.JoinHostPort("192.168.1.2", strconv.Itoa(n.Port)) {
-			return net.ErrClosed
-		}
-		checks.Add(1)
+	}), reach.WithVerify(func(_ context.Context, _, address string) error {
+		checked <- address
+		<-wait
 		return nil
 	}))
-	waitForTarget(t, p, n, net.JoinHostPort("100.64.1.2", strconv.Itoa(n.Port)))
+	vpn := net.JoinHostPort(n.Addresses[1], strconv.Itoa(n.Port))
+	lan := net.JoinHostPort(n.Addresses[0], strconv.Itoa(n.Port))
+	if got := f.targets.ChooseWithin(context.Background(), n.ID, nodeCandidates(n)); got != vpn {
+		t.Fatalf("initial route = %q, want %q", got, vpn)
+	}
 	lanReady.Store(true)
-	mu.Lock()
-	close(ch)
-	ch = make(chan struct{})
-	mu.Unlock()
-	waitForTarget(t, p, n, net.JoinHostPort("192.168.1.2", strconv.Itoa(n.Port)))
-	var dialled atomic.Value
-	p.plainHTTPTransport().DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		dialled.Store(address)
-		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	f.discovery.SetSubscribed([]Node{n})
+	f.refreshPeerEndpoints()
+	candidates := f.resolveCandidates("fixture-model")
+	if len(candidates) != 1 || candidates[0].url.Host != vpn {
+		t.Fatalf("ranked candidates = %+v, want one peer at %s", candidates, vpn)
 	}
-	rec := httptest.NewRecorder()
-	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama"}`)))
-	want := net.JoinHostPort("192.168.1.2", strconv.Itoa(n.Port))
-	if rec.Code != http.StatusOK || dialled.Load() != want || checks.Load() == 0 {
-		t.Fatalf("status = %d, dialled = %v, checks = %d, want 200/%s with verification", rec.Code, dialled.Load(), checks.Load(), want)
+	select {
+	case addr := <-checked:
+		t.Fatalf("ranking or discovery refresh started a return check for idle peer at %s", addr)
+	case <-time.After(100 * time.Millisecond):
 	}
+	c := candidates[0]
+	proxyReverseRoundTrip(t, p.candidateTransport(c), c.url.String())
+	select {
+	case addr := <-checked:
+		if addr != lan {
+			t.Fatalf("verified %q, want %q", addr, lan)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not start a return check")
+	}
+	release()
+	waitForTarget(t, p, n, lan)
 }
 
 // waitForTarget polls targetURL until it settles on want.

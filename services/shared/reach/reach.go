@@ -305,6 +305,17 @@ func NewChooser(opts ...Option) *Chooser {
 // has normally landed by the request after that. Waiting, by contrast, would put a
 // connect timeout in front of requests that had no need of one.
 func (c *Chooser) Prefer(key string, candidates []string) string {
+	return c.prefer(key, candidates, true)
+}
+
+// PreferCached applies the usual selection and initial confirmation without
+// starting a return check for a settled route. Ranking and discovery refresh
+// use this when the peer may never receive a request.
+func (c *Chooser) PreferCached(key string, candidates []string) string {
+	return c.prefer(key, candidates, false)
+}
+
+func (c *Chooser) prefer(key string, candidates []string, checkReturn bool) string {
 	fingerprint := strings.Join(candidates, "|")
 	c.mu.Lock()
 	c.observe(key, fingerprint)
@@ -317,7 +328,9 @@ func (c *Chooser) Prefer(key string, candidates []string) string {
 		return candidates[0]
 	}
 	if address, ok := c.reuse(key, candidates, fingerprint, c.now()); ok {
-		c.startReturn(key, candidates)
+		if checkReturn {
+			c.startReturn(key, candidates)
+		}
 		c.mu.Unlock()
 		return address
 	}

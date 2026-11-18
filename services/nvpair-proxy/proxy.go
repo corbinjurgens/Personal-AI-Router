@@ -740,8 +740,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 	placed := make(map[string]bool, len(nodes))
 	add := func(n Node) {
 		placed[n.ID] = true
-		// targetURL uses targets.Prefer's cached address or the first candidate,
-		// without probing; nil only when the node has no usable address.
+		// Ranking reads the chooser without starting a verified return check.
 		u := f.targetURL(n)
 		if u == nil {
 			return
