@@ -22,6 +22,12 @@ import (
 // cannot tell. Reconnecting gets it a fresh app:ready and lets it re-read state.
 const clientQueueFrames = 4096
 
+// clientQueueBytes bounds the bytes waiting to be written to one client,
+// including the frame being written. Frames can be up to
+// jsonrpc.WorkerFrameBytes, so the frame bound alone would let one stalled
+// client hold gigabytes.
+const clientQueueBytes = 4 * jsonrpc.WorkerFrameBytes
+
 // clientFlushTimeout bounds how long a gracefully closed client's queued
 // frames may take to drain before its connection is closed anyway.
 const clientFlushTimeout = 2 * time.Second
@@ -35,6 +41,7 @@ type client struct {
 	mu      sync.Mutex
 	out     chan []byte
 	closing bool
+	queued  int // guarded by mu, including the frame being written
 
 	// written is closed when the writer goroutine has finished and the
 	// connection is closed.
@@ -57,7 +64,11 @@ func (c *client) writeLoop() {
 	defer close(c.written)
 	defer c.conn.Close()
 	for frame := range c.out {
-		if err := c.writeFrame(frame); err != nil {
+		err := c.writeFrame(frame)
+		c.mu.Lock()
+		c.queued -= len(frame)
+		c.mu.Unlock()
+		if err != nil {
 			// The reader notices the closed connection and detaches the
 			// client; drain so senders never block on a dead queue.
 			_ = c.conn.Close()
@@ -102,14 +113,18 @@ func (c *client) send(frame []byte) {
 	if c.closing {
 		return
 	}
-	select {
-	case c.out <- frame:
-	default:
-		slog.Warn("client is not reading; disconnecting it", "client", c.id, "queued", len(c.out))
-		c.closing = true
-		close(c.out)
-		_ = c.conn.Close()
+	if len(frame) <= clientQueueBytes-c.queued {
+		select {
+		case c.out <- frame:
+			c.queued += len(frame)
+			return
+		default:
+		}
 	}
+	slog.Warn("client is not reading; disconnecting it", "client", c.id, "queued", len(c.out), "queuedBytes", c.queued)
+	c.closing = true
+	close(c.out)
+	_ = c.conn.Close()
 }
 
 // sendMessage marshals and queues msg.
