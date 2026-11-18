@@ -4,6 +4,7 @@
 package clustertrust
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -25,6 +26,98 @@ import (
 )
 
 type serviceClientConnContextKey struct{}
+
+func TestPeerServiceClientPeerStatsBytes(t *testing.T) {
+	test := func(name string, plain, reuse, reverse bool) {
+		t.Run(name, func(t *testing.T) {
+			stats := isolatedPeerStats(t)
+			requestBytes := make(chan int, 2)
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var wire bytes.Buffer
+				if err := r.Write(&wire); err != nil {
+					t.Error(err)
+					return
+				}
+				requestBytes <- wire.Len()
+				w.Header().Set("Content-Length", "5")
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Header().Set("Date", "Wed, 18 Nov 2026 00:00:00 GMT")
+				writeServiceResponse(t, w, "hello")
+			})
+			f := newServiceClientFixture(t, handler)
+			f.adapter.opts.ReuseConnections = reuse
+			service, target := noderec.ServiceCluster, f.url
+			if plain {
+				server := httptest.NewServer(handler)
+				t.Cleanup(server.Close)
+				u, err := url.Parse(server.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				service, target = noderec.ServiceNodeInfo, server.URL
+				f.routes[service] = PeerServiceRoute{"v1", u.Host, ReversePlain, 1}
+				f.direct = func(ctx context.Context, _ noderec.ServiceKey) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "tcp", u.Host)
+				}
+			}
+			if reverse {
+				f.direct = func(context.Context, noderec.ServiceKey) (net.Conn, error) { return nil, errors.New("direct blocked") }
+			}
+			var sent, received int64
+			for range 2 {
+				method := http.MethodGet
+				var body io.Reader
+				if reuse {
+					method, body = http.MethodPost, strings.NewReader("request")
+				}
+				req, err := http.NewRequest(method, target, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := f.adapter.Client("peer", service).Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := resp.Body.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if string(data) != "hello" {
+					t.Fatalf("body = %q", data)
+				}
+				sent += int64(<-requestBytes)
+				resp.Body = io.NopCloser(bytes.NewReader(data))
+				var wire bytes.Buffer
+				if err := resp.Write(&wire); err != nil {
+					t.Fatal(err)
+				}
+				received += int64(wire.Len())
+			}
+			deltas, _ := stats.take()
+			if reverse {
+				sent, received = 0, 0
+			}
+			assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "bytes_written", View: "direct"}, sent)
+			assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "bytes_read", View: "direct"}, received)
+			attempts := int64(2)
+			if reuse || reverse {
+				attempts = 1
+			}
+			assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "dial_attempts", Route: "direct"}, attempts)
+			if reverse {
+				assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "dial_failures", Route: "direct"}, 1)
+				assertPeerStat(t, deltas, peerStatKey{Peer: "peer", Counter: "dial_attempts", Route: "reverse"}, 2)
+			}
+		})
+	}
+	test("plain direct GET", true, false, false)
+	test("TLS direct GET", false, false, false)
+	test("reusable direct POST", false, true, false)
+	test("reverse GET", false, false, true)
+}
 
 type serviceClientFixture struct {
 	adapter      *PeerServiceClient

@@ -265,7 +265,7 @@ func (m *ReverseManager) Register(peer ReversePeer, conn net.Conn, initiator, id
 	cfg.StreamOpenTimeout = m.opts.SetupTimeout
 	cfg.ConnectionWriteTimeout = m.opts.SetupTimeout
 	cfg.LogOutput = yamuxLog{m.logger(), peer.UUID}
-	conn = newReverseMuxConn(conn, m.opts.SetupTimeout)
+	conn = newReverseMuxConn(DefaultPeerStats.CountConn(conn, peer.UUID, "reverse-tunnel"), m.opts.SetupTimeout)
 	var session *yamux.Session
 	var err error
 	if initiator == m.opts.LocalUUID {
@@ -287,6 +287,7 @@ func (m *ReverseManager) Register(peer ReversePeer, conn net.Conn, initiator, id
 		old.end("replaced by duplicate session")
 	}
 	m.sessions[peer.UUID] = s
+	DefaultPeerStats.SessionUp(peer.UUID)
 	m.wg.Add(1)
 	m.mu.Unlock()
 	if old != nil {
@@ -679,6 +680,7 @@ func (m *ReverseManager) accept(s *reverseSession) {
 		s.end("session ended")
 		s.cancel()
 		s.session.Close()
+		DefaultPeerStats.SessionDown(s.peer.UUID, sessionCloseLabel(s.reason()))
 		if m.opts.OnSessionEnd != nil {
 			m.opts.OnSessionEnd(s.peer, time.Since(s.started), s.reason() == "replaced by duplicate session")
 		}
@@ -733,6 +735,29 @@ func (m *ReverseManager) accept(s *reverseSession) {
 			defer func() { s.mu.Lock(); delete(s.forwards, id); s.mu.Unlock() }()
 			m.serve(ctx, s, stream)
 		}()
+	}
+}
+
+func sessionCloseLabel(reason string) string {
+	switch {
+	case reason == "session ended" || strings.HasPrefix(reason, "session ended: "):
+		return "ended"
+	case reason == "replaced by duplicate session":
+		return "replaced"
+	case reason == "peer no longer admitted":
+		return "not-admitted"
+	case reason == "revoked":
+		return "revoked"
+	case reason == "reverse manager closed":
+		return "manager-closed"
+	case strings.HasPrefix(reason, "control stream"):
+		return "control-failed"
+	case reason == "peer exceeded the per-session stream limit" || strings.HasPrefix(reason, "stream rejected"):
+		return "protocol"
+	case reason == "probe failed":
+		return "probe-failed"
+	default:
+		return "other"
 	}
 }
 

@@ -149,6 +149,15 @@ func assertPeerStat(t *testing.T, deltas []peerStatDelta, key peerStatKey, want 
 	}
 }
 
+func isolatedPeerStats(t *testing.T) *PeerStats {
+	t.Helper()
+	old := DefaultPeerStats
+	s := NewPeerStats()
+	DefaultPeerStats = s
+	t.Cleanup(func() { DefaultPeerStats = old })
+	return s
+}
+
 func TestPeerStatsLogDeltasAndIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := NewPeerStats()

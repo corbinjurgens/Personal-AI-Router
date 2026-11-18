@@ -28,6 +28,68 @@ import (
 
 const reverseTestID = "11111111111111111111111111111111"
 
+func TestSessionCloseLabel(t *testing.T) {
+	for _, tc := range []struct{ reason, want string }{
+		{"session ended", "ended"},
+		{"session ended: EOF", "ended"},
+		{"replaced by duplicate session", "replaced"},
+		{"peer no longer admitted", "not-admitted"},
+		{"revoked", "revoked"},
+		{"reverse manager closed", "manager-closed"},
+		{"control stream setup failed: EOF", "control-failed"},
+		{"control stream read failed: EOF", "control-failed"},
+		{"peer exceeded the per-session stream limit", "protocol"},
+		{"stream rejected: capacity", "protocol"},
+		{"probe failed", "probe-failed"},
+		{"unknown failure", "other"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			if got := sessionCloseLabel(tc.reason); got != tc.want {
+				t.Fatalf("label = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReversePeerStatsSessionLifecycle(t *testing.T) {
+	stats := isolatedPeerStats(t)
+	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
+	reverseTestConnect(t, a, b, "a", reverseTestID)
+	if closed := a.Probe(); closed != 0 {
+		t.Fatalf("live probe closed %d sessions", closed)
+	}
+	a.Close()
+	b.Close()
+	deltas, gauges := stats.take()
+	for _, peer := range []string{"a", "b"} {
+		assertPeerStat(t, deltas, peerStatKey{Peer: peer, Counter: "sessions_up"}, 1)
+		var down, read, written int64
+		for _, d := range deltas {
+			if d.Peer != peer {
+				continue
+			}
+			if d.Counter == "sessions_down" {
+				down += d.Value
+			}
+			if d.View == "reverse-tunnel" && d.Counter == "bytes_read" {
+				read += d.Value
+			}
+			if d.View == "reverse-tunnel" && d.Counter == "bytes_written" {
+				written += d.Value
+			}
+		}
+		if down != 1 || read == 0 || written == 0 {
+			t.Fatalf("peer %s: down=%d read=%d written=%d", peer, down, read, written)
+		}
+	}
+	for _, g := range gauges {
+		if g.Live != 0 {
+			t.Errorf("closed session gauge = %+v", g)
+		}
+	}
+}
+
 func TestReverseProbeLivePair(t *testing.T) {
 	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
 	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})

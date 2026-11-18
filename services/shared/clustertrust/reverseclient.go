@@ -719,6 +719,7 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 		return conn, nil
 	}
 	tryDirect := func() (net.Conn, error) {
+		DefaultPeerStats.DialAttempt(key.uuid, "direct")
 		setup, cancel := context.WithTimeout(setupContext, budget)
 		conn, err := p.opts.DialContext(setup, "tcp", identity.route.Address)
 		if err == nil {
@@ -727,8 +728,9 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 		cancel()
 		if err == nil {
 			p.outcome(h, true, epoch)
-			return conn, nil
+			return DefaultPeerStats.CountConn(conn, key.uuid, "direct"), nil
 		}
+		DefaultPeerStats.DialFailed(key.uuid, "direct")
 		if setupContext.Err() == nil {
 			p.outcome(h, false, epoch)
 		} else {
@@ -755,6 +757,7 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 	}
 	// The private context owns the full lifetime; only inner TLS uses this
 	// separate setup timer, so its successful stream survives setup cancellation.
+	DefaultPeerStats.DialAttempt(key.uuid, "reverse")
 	conn, err := p.opts.DialReverse(req.Context(), p.opts.BaseConfigDir, key.uuid, key.service)
 	if err == nil {
 		setup, cancel := context.WithTimeout(setupContext, 5*time.Second)
@@ -762,6 +765,7 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 		cancel()
 	}
 	if err != nil {
+		DefaultPeerStats.DialFailed(key.uuid, "reverse")
 		// A refusal is authoritative at dial time, including when a session
 		// disappeared after backoff was selected. No request was dispatched.
 		if !direct && retryDirect && errors.Is(err, ErrReverseNoSession) && reverseDialContextError(setupContext) == nil {

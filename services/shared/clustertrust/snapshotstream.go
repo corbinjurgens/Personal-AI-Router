@@ -72,6 +72,8 @@ func ServeSnapshotStream[T any](w http.ResponseWriter, r *http.Request, s Snapsh
 
 // SnapshotStreamClient configures ReadSnapshotStream.
 type SnapshotStreamClient[T any] struct {
+	Kind        string                  // bounded service name for process-local counters
+	Peer        string                  // admitted peer UUID for process-local counters
 	Changed     func() <-chan struct{}  // optional address-change/wake source
 	Idle        time.Duration           // cancel when no line (keepalives included) arrives within Idle; required
 	Recheck     time.Duration           // also call Current on this interval; 0 = before every line only
@@ -112,6 +114,9 @@ const (
 // is set, Current is called from a second goroutine and must be safe for
 // concurrent use.
 func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, body io.Reader, c SnapshotStreamClient[T]) (outcome StreamOutcome, err error) {
+	stats := DefaultPeerStats
+	stats.StreamOpened(c.Peer, c.Kind)
+	defer func() { stats.StreamEnded(c.Peer, c.Kind, string(outcome.End)) }()
 	var mu sync.Mutex
 	var reason StreamEnd
 	stop := func(end StreamEnd) {
@@ -187,6 +192,7 @@ func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, b
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), c.MaxLine)
 	for scanner.Scan() {
+		stats.StreamBytes(c.Peer, c.Kind, int64(len(scanner.Bytes())))
 		if c.Changed != nil {
 			lastLine.Store(now().UnixNano())
 		}
