@@ -1,0 +1,149 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Overview benchmark tooling
+
+Use a booked host and collect one GUI arm at a time against the same warmed
+service and model. Freeze the comparison table, parity checks and primary,
+tray and active-use scenes before recording. Keep stock Electron, matched
+Electron and Wails separate. Collect service-only idle and warmed inference
+controls before the GUI runs. Alternate arm order across at least three timed
+pairs per decisive scene. Interleave same-arm runs on the same machine for
+noise. Keep a separate trace for short UI interactions.
+
+## Capture
+
+Run from the repository root. Set the example paths, names and patterns to the
+packaged host under test and write to the designated evidence directory. Use
+the same interval within a comparison. Capture for 340 seconds to leave room
+for a five-minute steady window such as `[30000, 330000]` in elapsed milliseconds.
+
+Windows PowerShell 5.1, with English performance counter names:
+
+```powershell
+$bench = 'desktop/experiments/wails-overview/bench'
+$evidence = 'C:\BenchEvidence\overview'
+$gui = 'C:\Path\To\PackagedHost.exe'
+$model = '\\runner\.exe(?:[" ]|$)'
+& "$bench/sample-windows.ps1" -GuiPath $gui -ModelPattern $model -IntervalSeconds 5 -DurationSeconds 340 |
+    Set-Content -Encoding UTF8 "$evidence\visible-01.jsonl"
+node "$bench/compare.mjs" --validate-samples "$evidence\visible-01.jsonl"
+```
+
+Pass `-GuiName @('PAIR', 'AnotherMain')` for image names without `.exe`.
+`-HelperPattern` can include verified out-of-tree helpers. On Windows the
+helper, renderer, GPU and model expressions match executable path and command
+line in memory. The default renderer and GPU expressions recognize Chromium
+`--type=` flags. Supply specific expressions for WebView2 when its command
+lines and process tree provide ownership evidence.
+
+macOS with Node on `PATH`:
+
+```bash
+bench=desktop/experiments/wails-overview/bench
+evidence=/absolute/path/to/overview-evidence
+gui=/Applications/PackagedHost.app/Contents/MacOS/PackagedHost
+bash "$bench/sample-macos.sh" --gui-path "$gui" --renderer ' Helper \(Renderer\)$' \
+  --gpu ' Helper \(GPU\)$' --model '/runner$' --interval 5 --duration 340 \
+  > "$evidence/visible-01.jsonl"
+node "$bench/compare.mjs" --validate-samples "$evidence/visible-01.jsonl"
+```
+
+Repeat `--gui-name` for exact basenames or `--gui-path` for exact executable paths.
+The macOS helper, renderer, GPU and model expressions match the `ps` executable
+name/path field. Include detached WebKit helpers only when their ownership can
+be verified. On either OS, selectors seed groups and the collector follows their
+descendants. Use `-ServicePattern` or `--service` to adjust the service image-name
+selector. For service-only controls, omit the GUI selectors. The model selector
+takes precedence when a model engine belongs to the service process tree.
+Role expressions classify selected helpers and leave the remainder in
+`gui/other`. Use distinct main and detached helper selectors.
+
+The samplers only observe. They omit paths, command lines, request payloads,
+machine names and model names from output. A missed timer slot stays missing;
+inspect timestamps and window coverage before treating a run as representative.
+Processes that finish between samples or that already detached before observation
+require separate attribution evidence.
+
+## Counters
+
+Each JSONL line is a schema 1 sample with `os`, UTC `timestamp`, monotonic
+`elapsedMs`, `processes` and `system`. Each process has a PID, UTC
+`createdUtc`, a `group` and a `role`. Unknown or unavailable counters are
+`null`. A PID with a new creation time is a new process.
+
+| Field | Windows | macOS |
+| --- | --- | --- |
+| `memoryBytes` | `Process V2` or `Process` **Working Set - Private**, matched using **ID Process** between creation-time snapshots | `top -l 1 -stats pid,mem` **MEM**, the process physical footprint, rounded at the precision printed by `top` |
+| `commitBytes` | **Private Bytes**, private committed address space | Unknown |
+| `cpuMsPerSec` | Delta of CIM **KernelModeTime + UserModeTime** divided by actual elapsed time | Delta of cumulative **ps -o time=** divided by actual elapsed time |
+| `cpuPercentOneCore` | Cooked **% Processor Time**, with 100% equal to one busy core | Unknown. Use the cumulative CPU delta |
+| `gpuEnginePercent` | Sum of per-PID **GPU Engine / Utilization Percentage** instances, across engines. Can exceed 100 | Unknown |
+| `gpuDedicatedBytes`, `gpuSharedBytes` | Per-PID sums of **GPU Process Memory / Dedicated Usage** and **Shared Usage** | Unknown |
+| System memory and paging | **Memory / Available Bytes**, **Pages Input/sec**, **Pages Output/sec**, and OS page size | `vm_stat` page size, cumulative page-ins, page-outs, swap-ins and swap-outs, and `memory_pressure -Q` system-wide free percentage |
+
+Windows private working sets exclude shareable pages. macOS physical footprint
+is the kernel's per-task charge, which can include compressed memory and
+charged shared allocations. Adding processes' physical footprints adds their
+reported task charges without deduplicating shared backing or measuring the
+system-wide physical delta. On macOS, `ps -o lstart=` resolves creation time
+to one second. GPU counters can include shared allocations or report no
+instance for an idle process. If ambiguous GPU or webview ownership could
+reverse a result, set `attributionClear` to false.
+
+## Analyze
+
+Use [the synthetic manifest](fixtures/manifest.json) as the schema example.
+Use distinct files for real captures. Record before and after fences for each
+run using the observed service and broker PID and creation time, redacted
+executable/build identities (for example executable hashes), observed broker
+restart count and a redacted fingerprint of the effective model settings.
+Fence the entire pair as well. Preserve the observations supporting each fence
+and the evidence for settings, output parity and usable current data.
+
+Declare `primaryScene`, `trayScene` and `activeScene`. Each run names its
+platform, redacted `host`, `scene`, `arm`, `pair`, increasing
+capture `order` on that machine, raw `file` relative to the manifest,
+inclusive `windowMs`, and `requiredGuiRoles`. Use
+`kind: "comparison"` for matched Electron versus Wails,
+`kind: "control"` for a same-arm noise pair and
+`kind: "stock-reference"` for stock versus matched Electron. Pair names are
+local to the machine, scene and kind. Set `requiredGroup: "service"` for
+service-only idle or `"model"` when a model engine must be present. In the
+default GUI mode every steady sample must include a main process and any
+declared helper roles. Declare whether parity, attribution, usable current
+data and active-use conditions were actually observed. For inference samples,
+verify the chosen route, model and one successful attempt before including
+latency and throughput. Record per-observation measurements as numeric arrays
+and include completion percentages; a failed or unverified completion
+invalidates a run with inference timings.
+
+```bash
+node "$bench/compare.mjs" "$evidence/manifest.json" \
+  > "$evidence/summary.json" 2> "$evidence/summary.md"
+node --test "$bench/compare.test.mjs"
+```
+
+The analyzer rejects malformed counter rows, missing required helpers,
+unverified parity or attribution, and changed fences within or across paired
+runs. It records PID reuse separately. It reports the median of each steady
+window for group and role totals, system counters and external measurements.
+CPU deltas exclude samples without prior identity history, with the valid
+count reported. macOS paging rates are derived from adjacent cumulative
+observations. Raw counter differences are candidate minus baseline. Decision
+deltas are positive when the candidate improves. Relative inference deltas
+use that pair's baseline as the denominator.
+
+Noise is the maximum absolute delta among valid, interleaved same-arm controls
+from the same scene, machine and fence. A visible memory win requires every
+valid pair to favor Wails and a median benefit above both 100 MiB and observed
+noise. Guardrail tolerances are 5 percentage points for missed frames, 5% for
+throughput, 10% for first-token latency, 250 ms for warm reopen, and 50 MiB for
+tray memory. The overall OS verdict also requires sufficient visible and tray
+pairs and decisive guardrail and active-use results. Treat a Windows-only
+result as pending macOS confirmation.
+Review the stock reference separately when attributing gains to a narrower
+workload. Keep cold open, completion, attribution, native trace and installer
+size evidence with the output.

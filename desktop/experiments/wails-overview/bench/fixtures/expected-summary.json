@@ -1,0 +1,37 @@
+{
+  "SPDX-FileCopyrightText": "Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "windows": {
+    "verdict": "material-win",
+    "visibleMemory": {
+      "verdict": "material-win",
+      "threshold": 100,
+      "median": 160,
+      "noise": 5,
+      "range": [140, 170],
+      "deltas": [160, 140, 170]
+    }
+  },
+  "macos": {
+    "verdict": "no-material-win",
+    "visibleMemory": {
+      "verdict": "no-material-win",
+      "threshold": 100,
+      "median": 120,
+      "noise": 125,
+      "range": [120, 120],
+      "deltas": [120, 120, 120]
+    }
+  },
+  "pidReuse": {
+    "pid": 21,
+    "previousCreatedUtc": "2026-11-20T00:00:00.000Z",
+    "createdUtc": "2026-11-20T00:00:01.500Z",
+    "line": 2
+  },
+  "rejected": {
+    "missing": "missing major helper: gui/renderer",
+    "invalid": "line 2: invalid process record",
+    "restart": "service or broker fence changed across pair"
+  }
+}
