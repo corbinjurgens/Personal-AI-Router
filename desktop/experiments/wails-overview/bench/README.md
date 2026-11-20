@@ -110,7 +110,10 @@ Use [the synthetic manifest](fixtures/manifest.json) as the schema example.
 It contains one pair per OS and produces an inconclusive verdict. The tests
 generate a complete synthetic matrix with independent capture timestamps.
 Use a separate raw file for each run. The analyzer rejects every occurrence
-of a repeated capture SHA-256, including copies under different names.
+of a repeated capture identity across pairs and arms. The identity hashes the
+normalized parsed observations, so a different filename, UTF-8 BOM or line
+ending does not make a capture independent. The `captureSha256` field retains
+the SHA-256 of the original bytes for provenance.
 Record before and after fences for each
 run using the observed service and broker PID and creation time, redacted
 executable/build identities (for example executable hashes), observed broker
@@ -148,8 +151,10 @@ Use redacted request IDs. Record a `measurements.inferenceTimings` entry with
 and `tokensPerSecond`. Record its corroborating
 `measurements.inferenceRequests` entry with the same ID and attempt,
 `success: true`, `singleAttempt: true`, and the sampled local model
-`localModel: { pid, createdUtc }`. Retain the redacted route, model, node and
-terminal completion evidence and the evidence for a single attempt. The
+`localModel: { pid, createdUtc }`. The analyzer matches process incarnations
+by PID and UTC instant at up to seven fractional digits. Equivalent trailing
+zeros match across request evidence, samples and fences. Retain the redacted
+route, model, node, terminal completion and single-attempt evidence. The
 analyzer excludes and counts unkeyed, unmatched, failed, ambiguous and
 non-local timings. A declared failed request or a completion percentage below
 100 invalidates the run. Keep the other per-observation measurements as
@@ -187,11 +192,15 @@ needs complete counters for the selected GUI group. GPU demand needs complete
 steady-window utilization counters. The report lists the criteria that
 passed in `winCriteria`.
 
-Guardrail tolerances are 5 percentage points for missed frames, 5% for
-throughput, 10% for first-token latency, 250 ms for warm reopen, and 50 MiB for
-tray memory. The overall OS verdict requires at least three valid visible
-and tray comparisons, plus decisive guardrail and active-use results. Treat
-a Windows-only result as pending macOS confirmation.
+Guardrail tolerances are 100 MiB for visible memory, 5 percentage points
+for missed frames, 5% for throughput, 10% for first-token latency, 250 ms for
+warm reopen, and 50 MiB for tray memory. Each decisive pair must stay within
+the larger of the tolerance and its metric's observed noise. The
+`withinRegressionTolerance` field is null when measurements or controls are
+missing. Mixed visible memory deltas within the limit still allow the GUI
+demand and outcome criterion to win. The overall OS verdict requires at
+least three valid visible and tray comparisons, plus decisive guardrail and
+active-use results. Treat a Windows-only result as pending macOS confirmation.
 Review the stock reference separately when attributing gains to a narrower
 workload. Keep cold open, completion, attribution, native trace and installer
 size evidence with the output.

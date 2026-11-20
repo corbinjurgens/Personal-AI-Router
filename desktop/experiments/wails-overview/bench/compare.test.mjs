@@ -3,9 +3,10 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { compare } from './compare.mjs'
@@ -302,6 +303,34 @@ test('distinct paths with identical counter contents invalidate both pairs', () 
     }
 })
 
+test('a UTF-8 BOM and CRLF do not make a reused capture independent', () => {
+    const file = writeFixture()
+    const { runs } = JSON.parse(readFileSync(file, 'utf8'))
+    const candidates = runs.filter(
+        run => run.os === 'windows' && run.scene === 'visible' && run.arm === 'wails'
+    )
+    const source = candidates.find(run => run.pair === 'a')
+    const copy = candidates.find(run => run.pair === 'b')
+    const original = readFileSync(join(dirname(file), source.file), 'utf8')
+    const converted = '\uFEFF' + original.replaceAll('\n', '\r\n')
+    writeFileSync(join(dirname(file), copy.file), converted)
+
+    const result = compare(file)
+    assert.equal(result.platforms.windows.verdict, 'inconclusive')
+    for (const [declaration, raw] of [
+        [source, original],
+        [copy, converted]
+    ]) {
+        const run = result.runs.find(run => run.file === declaration.file)
+        assert.deepEqual(run.issues, ['raw capture reused'])
+        assert.equal(run.captureSha256, createHash('sha256').update(raw).digest('hex'))
+        const pair = result.pairs.find(
+            pair => pair.os === 'windows' && pair.scene === 'visible' && pair.id === run.pair
+        )
+        assert.deepEqual(pair.deltas, {})
+    }
+})
+
 for (const replaced of [['matched-electron', 'wails'], ['wails']]) {
     test(`stock noise cannot substitute for ${replaced.join(' or ')} controls`, () => {
         const file = writeFixture(runs => {
@@ -417,6 +446,45 @@ test('duplicate timings or request records cannot provide independent inference 
     })
 })
 
+test('inference joins equivalent process timestamps and distinguishes 100 ns', () => {
+    const file = writeFixture(runs => {
+        const { run, samples } = firstCandidate(runs)
+        const { inferenceRequests, inferenceTimings } = run.measurements
+        for (const [index, sample] of samples.entries()) {
+            const model = sample.processes.find(row => row.group === 'model')
+            model.createdUtc =
+                index === 0 ? '2026-11-20T00:00:00.1234000Z' : '2026-11-20T00:00:00.123400Z'
+        }
+        for (const request of inferenceRequests) {
+            request.localModel.createdUtc = '2026-11-20T00:00:00.1234Z'
+        }
+        run.fence.after.broker.createdUtc = '2026-11-20T00:00:00Z'
+        inferenceRequests.push({
+            ...inferenceRequests[0],
+            requestId: 'different-incarnation',
+            localModel: { pid: 31, createdUtc: '2026-11-20T00:00:00.1234001Z' }
+        })
+        inferenceTimings.push({
+            requestId: 'different-incarnation',
+            attempt: 1,
+            firstTokenMs: 1,
+            tokensPerSecond: 1000
+        })
+    })
+
+    const result = compare(file)
+    const run = result.runs.find(run => run.os === 'windows' && run.order === 2)
+    assert.deepEqual(run.inference, {
+        credited: 3,
+        excluded: 1,
+        exclusionReasons: { 'local model not sampled': 1 }
+    })
+    assert.equal(run.outcome.tokensPerSecond, 21)
+    assert.equal(run.outcome.firstTokenMs, 110)
+    assert.deepEqual(run.pidReuse, [expected.pidReuse])
+    assert.equal(result.platforms.windows.verdict, 'material-win')
+})
+
 function resourceWin(runs, { resource, outcome, noise = 0, disagree = false }) {
     const windows = runs.filter(visible)
     for (const { run, samples } of windows) {
@@ -465,6 +533,46 @@ for (const [resource, outcome, metric, gain] of [
         assert.equal(platform.metrics[metric].median, gain)
         assert.equal(platform.verdict, 'material-win')
         assert.deepEqual(platform.winCriteria, [{ metric: demand, outcome: metric }])
+    })
+}
+
+for (const [scenario, memoryLossMiB, verdict, winCriteria] of [
+    [
+        'one pair loses 4 MiB',
+        4,
+        'material-win',
+        [{ metric: 'guiCpuMsPerSec', outcome: 'tokensPerSecondPercent' }]
+    ],
+    ['one pair loses 101 MiB', 101, 'inconclusive', []]
+]) {
+    test(`CPU and throughput verdict when ${scenario}`, () => {
+        const file = writeFixture(runs => {
+            resourceWin(runs, { resource: 'cpuMsPerSec', outcome: 'tokens' })
+            for (const { run, samples } of runs.filter(comparison)) {
+                const memoryMiB =
+                    run.arm === 'matched-electron'
+                        ? 400
+                        : run.pair === 'b'
+                          ? 400 + memoryLossMiB
+                          : 240
+                for (const sample of samples) {
+                    for (const row of sample.processes.filter(row => row.group === 'gui')) {
+                        row.memoryBytes = row.role === 'main' ? memoryMiB * 1024 ** 2 : 0
+                    }
+                }
+            }
+        })
+        const platform = compare(file).platforms.windows
+        const memory = platform.metrics.visibleMemoryMiB
+        assert.equal(memory.verdict, 'inconclusive')
+        assert.deepEqual(
+            memory.deltas.map(delta => delta.value),
+            [160, -memoryLossMiB, 160, 160]
+        )
+        assert.equal(platform.metrics.guiCpuMsPerSec.median, 39)
+        assert.equal(platform.metrics.tokensPerSecondPercent.median, 5)
+        assert.equal(platform.verdict, verdict)
+        assert.deepEqual(platform.winCriteria, winCriteria)
     })
 }
 

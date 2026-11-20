@@ -38,22 +38,36 @@ const outcomes = ['coldOpenMs', 'warmReopenMs', 'missedFramesPercent', 'completi
 const inferenceMetrics = ['firstTokenMs', 'tokensPerSecond']
 const MiB = 1024 ** 2
 const tuple = (...parts) => JSON.stringify(parts)
-const identity = ({ pid, createdUtc }) => tuple(pid, createdUtc)
 const quantity = value => Number.isFinite(value) && value >= 0
 const pid = value => Number.isSafeInteger(value) && value > 0
 const counter = value => value === null || quantity(value)
-const utc = value =>
-    typeof value === 'string' &&
-    /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?Z$/.test(value) &&
-    Number.isFinite(Date.parse(value))
 const label = value => typeof value === 'string' && value.length > 0
 
+function canonicalUtc(value) {
+    if (typeof value !== 'string') return null
+    const match = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.(\d{1,7}))?Z$/.exec(value)
+    if (!match) return null
+    const date = new Date(value)
+    if (!Number.isFinite(date.getTime())) return null
+    // Date resolves the whole second. Keep the original fractional precision.
+    const second = date.toISOString().slice(0, -5)
+    const [, fraction = ''] = match
+    return `${second}.${fraction.padEnd(7, '0')}Z`
+}
+
+function identity(row) {
+    if (!pid(row?.pid)) return null
+    const createdUtc = canonicalUtc(row.createdUtc)
+    return createdUtc && tuple(row.pid, createdUtc)
+}
+
 export function validateSample(sample) {
+    const timestamp = canonicalUtc(sample?.timestamp)
     if (
         sample?.schema !== 1 ||
         !systems.includes(sample.os) ||
         !quantity(sample.elapsedMs) ||
-        !utc(sample.timestamp) ||
+        !timestamp ||
         !Array.isArray(sample.processes) ||
         !sample.system ||
         (sample.attributionClear !== undefined && typeof sample.attributionClear !== 'boolean') ||
@@ -62,12 +76,13 @@ export function validateSample(sample) {
         return 'invalid sample envelope'
     const seen = new Set()
     for (const row of sample.processes) {
+        const createdUtc = canonicalUtc(row?.createdUtc)
         if (
             !row ||
             !pid(row.pid) ||
-            !utc(row.createdUtc) ||
+            !createdUtc ||
             seen.has(row.pid) ||
-            Date.parse(row.createdUtc) > Date.parse(sample.timestamp) ||
+            createdUtc > timestamp ||
             !Object.hasOwn(roles, row.group) ||
             !roles[row.group].includes(row.role) ||
             !counters.every(key => counter(row[key]))
@@ -101,6 +116,29 @@ function series(text, visit, invalid) {
             if (problem) invalid(index + 1, problem)
             else visit(sample, index + 1)
         })
+}
+
+function sortObjectKeys(_key, value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+    return Object.fromEntries(
+        Object.keys(value)
+            .sort()
+            .map(key => [key, value[key]])
+    )
+}
+
+function canonicalObservation(sample) {
+    return JSON.stringify(
+        {
+            ...sample,
+            timestamp: canonicalUtc(sample.timestamp),
+            processes: sample.processes.map(row => ({
+                ...row,
+                createdUtc: canonicalUtc(row.createdUtc)
+            }))
+        },
+        sortObjectKeys
+    )
 }
 
 function verifyManifest(manifest) {
@@ -139,17 +177,19 @@ function verifyManifest(manifest) {
 }
 
 function fenceKey(fence) {
+    const service = identity(fence?.service)
+    const broker = identity(fence?.broker)
     if (
-        !fence ||
+        !service ||
+        !broker ||
         ![fence.serviceBuild, fence.brokerBuild, fence.modelSettings].every(label) ||
         !Number.isSafeInteger(fence.brokerRestartCount) ||
-        fence.brokerRestartCount < 0 ||
-        ![fence.service, fence.broker].every(row => row && pid(row.pid) && utc(row.createdUtc))
+        fence.brokerRestartCount < 0
     )
         return null
     return tuple(
-        identity(fence.service),
-        identity(fence.broker),
+        service,
+        broker,
         fence.serviceBuild,
         fence.brokerBuild,
         fence.brokerRestartCount,
@@ -198,8 +238,7 @@ function summarizeInference(measurements, samples, issues) {
         else if (request?.attempt !== timing.attempt) exclude('request or attempt unmatched')
         else if (request.success !== true) exclude('request unsuccessful')
         else if (request.singleAttempt !== true) exclude('single attempt unverified')
-        else if (!request.localModel || !localModels.has(identity(request.localModel)))
-            exclude('local model not sampled')
+        else if (!localModels.has(identity(request.localModel))) exclude('local model not sampled')
         else {
             for (const metric of fields) outcomeValues[metric].push(timing[metric])
             credited++
@@ -233,7 +272,7 @@ function summarizeRun(run, base, { primaryScene, trayScene, activeScene }) {
     const busy = run.scene === primaryScene || run.scene === activeScene
     const requiredGuiRoles = new Set(run.requiredGuiRoles)
     if (busy || (run.requiredGroup ?? 'gui') === 'gui') requiredGuiRoles.add('main')
-    const lastCreation = new Map()
+    const lastProcess = new Map()
     const pidReuse = []
     let previous
     const expectedFence = fenceKey(run.fence?.before)
@@ -248,29 +287,33 @@ function summarizeRun(run, base, { primaryScene, trayScene, activeScene }) {
 
     const capture = readFileSync(resolve(base, run.file))
     const captureSha256 = createHash('sha256').update(capture).digest('hex')
+    const observationHash = createHash('sha256')
+    let hasObservations = false
     series(
         capture.toString('utf8'),
         (sample, line) => {
+            observationHash.update(canonicalObservation(sample) + '\n')
+            hasObservations = true
             if (
                 sample.os !== run.os ||
                 (previous &&
                     (sample.elapsedMs <= previous.elapsedMs ||
-                        Date.parse(sample.timestamp) < Date.parse(previous.timestamp)))
+                        canonicalUtc(sample.timestamp) < canonicalUtc(previous.timestamp)))
             ) {
                 issues.add(`line ${line}: platform or sample order mismatch`)
                 return
             }
             previous = sample
             for (const row of sample.processes) {
-                const old = lastCreation.get(row.pid)
-                if (old && old !== row.createdUtc)
+                const old = lastProcess.get(row.pid)
+                if (old && identity(old) !== identity(row))
                     pidReuse.push({
                         pid: row.pid,
-                        previousCreatedUtc: old,
+                        previousCreatedUtc: old.createdUtc,
                         createdUtc: row.createdUtc,
                         line
                     })
-                lastCreation.set(row.pid, row.createdUtc)
+                lastProcess.set(row.pid, row)
             }
             for (const role of ['service', 'broker']) {
                 const matching = sample.processes.filter(
@@ -387,6 +430,7 @@ function summarizeRun(run, base, { primaryScene, trayScene, activeScene }) {
     return {
         ...run,
         captureSha256,
+        captureIdentity: hasObservations ? observationHash.digest('hex') : null,
         fenceIdentity: expectedFence,
         issues: [...issues],
         pidReuse,
@@ -559,12 +603,14 @@ function evaluate(metric, comparisons, controls) {
         reason: 'missing valid pairs, decisive measurements or interleaved controls',
         threshold,
         noise,
+        withinRegressionTolerance: null,
         median: middle,
         range: values.length ? [Math.min(...values), Math.max(...values)] : null,
         deltas
     }
     if (middle === null || noise === null || values.length !== deltas.length) return result
     const limit = Math.max(threshold, noise)
+    result.withinRegressionTolerance = values.every(value => value >= -limit)
     const thresholdMet = improvementMetrics.includes(metric)
         ? middle >= threshold - 1e-12
         : middle > threshold
@@ -582,7 +628,7 @@ function evaluate(metric, comparisons, controls) {
             reason: 'all valid pairs favor baseline and median exceeds tolerance and noise'
         }
     }
-    if (values.some(value => value < -limit) || Math.abs(middle) > limit) {
+    if (!result.withinRegressionTolerance || Math.abs(middle) > limit) {
         return {
             ...result,
             reason: 'pairs disagree on direction or a pair exceeds regression tolerance'
@@ -599,7 +645,8 @@ export function compare(manifestPath) {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, ''))
     verifyManifest(manifest)
     const runs = manifest.runs.map(run => summarizeRun(run, dirname(manifestPath), manifest))
-    for (const captures of Map.groupBy(runs, run => run.captureSha256).values()) {
+    const observedRuns = runs.filter(run => run.captureIdentity !== null)
+    for (const captures of Map.groupBy(observedRuns, run => run.captureIdentity).values()) {
         if (captures.length > 1) for (const run of captures) run.issues.push('raw capture reused')
     }
     const pairs = makePairs(runs)
@@ -657,9 +704,10 @@ export function compare(manifestPath) {
             if (checks.some(check => check.verdict === 'regression')) {
                 verdict = 'regression'
                 reason = 'at least one decisive metric regressed'
-            } else if (checks.some(check => check.verdict === 'inconclusive')) {
+            } else if (checks.some(check => check.withinRegressionTolerance !== true)) {
                 verdict = 'inconclusive'
-                reason = 'at least one decisive metric or active-use comparison is inconclusive'
+                reason =
+                    'at least one metric exceeds regression tolerance or lacks decisive evidence'
             } else if (
                 [metrics.visibleMemoryMiB, metrics.trayMemoryMiB].some(
                     check => check.deltas.length < 3
