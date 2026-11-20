@@ -12,8 +12,7 @@ import {
     defaultServiceEndpointEnvironment,
     resolveServiceEndpoint
 } from '@/electron/service-bridge/service-endpoint'
-import { trackWindowVisibility } from '@/electron/window-visibility'
-import { overviewGenerationChannel, overviewInvokeChannel } from './ipc'
+import { createProjectionRealm } from './projection-module.js'
 import { bindOverviewWindow } from './window-session'
 
 const product = app.getName()
@@ -79,15 +78,19 @@ function showOverview() {
         }
     })
     overview = window
-    trackWindowVisibility(window)
     const contents = window.webContents
     contents.setWindowOpenHandler(() => ({ action: 'deny' }))
     contents.on('will-frame-navigate', event => event.preventDefault())
     contents.once('render-process-gone', () => window.destroy())
 
-    let detach: (() => void) | undefined
+    let attachment: ReturnType<typeof bindOverviewWindow> | undefined
+    const syncVisibility = () => attachment?.setVisible(window.isVisible() && !window.isMinimized())
+    window.on('show', syncVisibility)
+    window.on('hide', syncVisibility)
+    window.on('minimize', syncVisibility)
+    window.on('restore', syncVisibility)
     window.once('closed', () => {
-        detach?.()
+        attachment?.close()
         overview = undefined
     })
     window.once('ready-to-show', () => window.show())
@@ -98,22 +101,24 @@ function showOverview() {
             if (mode !== 'live' || window.isDestroyed()) return
             const { connect } = serviceConnectionDeps('', [])
             const dial = () => connect(resolveServiceEndpoint(defaultServiceEndpointEnvironment()))
-            detach = bindOverviewWindow(
+            attachment = bindOverviewWindow(
                 {
-                    register(invoke) {
-                        safeHandle(overviewInvokeChannel, (event, request) => {
+                    register(channel, invoke) {
+                        safeHandle(channel, (event, request) => {
                             if (event.sender !== contents)
                                 throw new Error('Unauthorized Overview sender')
                             return invoke(request)
                         })
-                        return () => ipcMain.removeHandler(overviewInvokeChannel)
+                        return () => ipcMain.removeHandler(channel)
                     },
-                    generation(id) {
-                        if (!contents.isDestroyed()) contents.send(overviewGenerationChannel, id)
+                    send(channel, payload) {
+                        if (!contents.isDestroyed()) contents.send(channel, payload)
                     }
                 },
-                dial
+                dial,
+                createProjectionRealm
             )
+            syncVisibility()
         })
         .catch(() => console.error('Could not open packaged Overview'))
 }

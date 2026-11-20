@@ -8,6 +8,7 @@ import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build as bundle } from 'vite'
 import { build as packageApp, Platform } from 'electron-builder'
+import { projectionBundle } from './projection-bundle.ts'
 
 const source = dirname(fileURLToPath(import.meta.url))
 const project = join(source, '../../..')
@@ -56,7 +57,7 @@ function entry(name) {
                 fileName: () => 'index.js'
             },
             rollupOptions: {
-                external: ['electron', /^node:/, ...builtinModules],
+                external: ['electron', './projection-module.js', /^node:/, ...builtinModules],
                 output: { inlineDynamicImports: true }
             }
         }
@@ -64,6 +65,7 @@ function entry(name) {
 }
 
 await bundle(entry('main'))
+await bundle(projectionBundle(join(stage, 'main')))
 await bundle(entry('preload'))
 await rm(join(stage, 'ui'), { force: true, recursive: true })
 await cp(join(dist, 'renderer'), join(stage, 'ui'), { recursive: true })

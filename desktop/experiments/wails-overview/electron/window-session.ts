@@ -3,16 +3,24 @@
 
 import type { Duplex } from 'node:stream'
 import { JsonRpcSocketClient } from '@/electron/service-bridge/json-rpc-client'
-import type { ServiceBridgeInvokeRequest } from '@/shared/types/service-bridge'
+import type {
+    ServiceBridgeInvokeRequest,
+    ServiceBridgePushMessage
+} from '@/shared/types/service-bridge'
 import type { WsInvokeChannel, WsInvokeResponse } from '@/shared/types/ws-channels'
 import { isOverviewRead, type OverviewRead } from '../ui/overview-reads'
-import { createOverviewProjection } from './projection'
+import { overviewGenerationChannel, overviewInvokeChannel, overviewPushChannel } from './ipc'
+import type { createOverviewProjection } from './projection'
 
 type Invoke = (request: ServiceBridgeInvokeRequest) => Promise<WsInvokeResponse<WsInvokeChannel>>
 
 interface WindowIpc {
-    register(invoke: Invoke): () => void
-    generation(id: number | null): void
+    register(channel: typeof overviewInvokeChannel, invoke: Invoke): () => void
+    send(
+        ...message:
+            | [typeof overviewGenerationChannel, number | null]
+            | [typeof overviewPushChannel, ServiceBridgePushMessage]
+    ): void
 }
 
 let nextGeneration = 0
@@ -23,19 +31,24 @@ function isReadRequest(
     return typeof request?.channel === 'string' && isOverviewRead(request.channel)
 }
 
-export function bindOverviewWindow(ipc: WindowIpc, dial: () => Promise<Duplex>): () => void {
+export function bindOverviewWindow(
+    ipc: WindowIpc,
+    dial: () => Promise<Duplex>,
+    createRealm: typeof createOverviewProjection
+) {
     const client = new JsonRpcSocketClient('broker', dial, undefined, dial)
     let current: { id: number; projection: ReturnType<typeof createOverviewProjection> } | null =
         null
+    let visible = false
 
     function retire() {
         const previous = current
         current = null
-        ipc.generation(null)
+        ipc.send(overviewGenerationChannel, null)
         previous?.projection.retire()
     }
 
-    const unbind = ipc.register(async request => {
+    const unbind = ipc.register(overviewInvokeChannel, async request => {
         if (!isReadRequest(request)) {
             throw new Error('Overview request is outside the read allowlist')
         }
@@ -51,8 +64,13 @@ export function bindOverviewWindow(ipc: WindowIpc, dial: () => Promise<Duplex>):
     client.on('notification', notification => {
         if (notification.method === 'app:ready') {
             if (!current) {
-                current = { id: ++nextGeneration, projection: createOverviewProjection(client) }
-                ipc.generation(current.id)
+                const id = ++nextGeneration
+                const projection = createRealm(client, message => {
+                    if (current?.id === id) ipc.send(overviewPushChannel, message)
+                })
+                current = { id, projection }
+                projection.setVisible(visible)
+                ipc.send(overviewGenerationChannel, id)
             }
         } else {
             try {
@@ -68,12 +86,19 @@ export function bindOverviewWindow(ipc: WindowIpc, dial: () => Promise<Duplex>):
     client.start()
 
     let closed = false
-    return () => {
+    function close() {
         if (closed) return
         closed = true
         unbind()
         client.removeAllListeners()
         retire()
         void client.detach()
+    }
+    return {
+        close,
+        setVisible(isVisible: boolean) {
+            visible = isVisible
+            current?.projection.setVisible(visible)
+        }
     }
 }

@@ -154,16 +154,16 @@ mutation paths are outside the experiment, including cluster identity setup,
 manual-node migration, service startup, startup registration, and updates.
 The private routing-attempt history stream is omitted in both experiments.
 
-### Known limit of the matched Electron live path
+### Matched Electron live generation boundaries
 
-Live windows share the production projection singleton returned by
-`getModularBridgeState()`. Retiring a generation clears projected discovery and
-proxy node sources, workload and error snapshots, and performance, and
-invalidates model observations. It does not clear every remembered engine fact,
-proxy port or download state that the production owner keeps as last-good
-values. A later successful response that omits an optional fact can therefore
-show a value from the previous generation. Failed baseline reads still leave
-the view unavailable.
+Each ready connection or broker generation creates a fresh instance of the
+production projection and node-info poller inside the Electron main process.
+Retiring an instance stops its polling and timers, drops its push sink, and
+rejects its late read results. The replacement starts with empty projection
+state, including engine facts, model observations, and proxy ports. An unready
+or malformed proxy status contributes no port. Failed baseline reads leave the
+view unavailable. Broker notifications on the service socket carry no run ID,
+so Electron uses the service's restart and ready notifications as its boundary.
 
 ## Wails live input: not implemented
 

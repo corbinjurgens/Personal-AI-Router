@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { emitBridgePush } from '@/electron/service-bridge/broadcaster'
 import {
     parseClusterNodes,
     parseNodeIdentity,
@@ -22,7 +21,11 @@ import {
     isUpstreamUnreachableError,
     parseServiceErrors
 } from '@/electron/service-bridge/modular-state'
-import { startNodeInfoPoller, stopNodeInfoPoller } from '@/electron/service-bridge/node-info-poller'
+import {
+    setNodeInfoPollerVisible,
+    startNodeInfoPoller,
+    stopNodeInfoPoller
+} from '@/electron/service-bridge/node-info-poller'
 import {
     nodeTargetParams,
     parseAvailabilityChange,
@@ -41,6 +44,7 @@ import { MODULAR_NODE_INFO_POLL_TIMEOUT_MS } from '@/shared/constants/modular-ru
 import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channels'
 import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import type { OverviewRead } from '../ui/overview-reads'
+import { attachProjectionPush, emitBridgePush, type ProjectionPush } from './projection-push'
 
 type OverviewHandlers = {
     [C in OverviewRead]: (payload: WsInvokeRequest<C> | undefined) => Promise<WsInvokeResponse<C>>
@@ -58,12 +62,15 @@ const visibleErrors = (value: JsonValue | undefined) =>
 // The window owns this adapter. Only these named reads and stream subscriptions
 // are ever sent. The production supervisor also owns service writes, so use the
 // existing decoders and projections below independently of its startup path.
-export function createOverviewProjection(client: Pick<JsonRpcSocketClient, 'call'>) {
+export function createOverviewProjection(
+    client: Pick<JsonRpcSocketClient, 'call'>,
+    push: ProjectionPush
+) {
     const state = getModularBridgeState()
+    const detachPush = attachProjectionPush(push)
     let retired = false
     let discoveryRevision = 0
     let engineRevision = 0
-    const proxyNodes = new Map<ProxyEngine, Map<string, JsonValue>>()
     const proxyChangesDuringBaseline = new Map<ProxyEngine, Set<string>>()
     const updatedEngines = new Map<string, number>()
     const remoteRevisions = new Map<string, number>()
@@ -83,20 +90,7 @@ export function createOverviewProjection(client: Pick<JsonRpcSocketClient, 'call
     )
 
     function applyProxy(engine: ProxyEngine, method: string, params?: JsonValue) {
-        const source = proxySourceForEngine(engine)
-        if (
-            params &&
-            (method === 'node/discovered' || method === 'node/updated' || method === 'node/removed')
-        ) {
-            const node = parseProxyNode(params, engine)
-            const nodes = proxyNodes.get(engine) ?? new Map<string, JsonValue>()
-            if (node) {
-                if (method === 'node/removed') nodes.delete(node.id)
-                else nodes.set(node.id, params)
-                proxyNodes.set(engine, nodes)
-            }
-        }
-        state.handleNotification({ source, method, params })
+        state.handleNotification({ source: proxySourceForEngine(engine), method, params })
     }
 
     function applyDiscovery(params: JsonValue | undefined) {
@@ -164,7 +158,17 @@ export function createOverviewProjection(client: Pick<JsonRpcSocketClient, 'call
                 const node = parseProxyNode(row, engine)
                 if (node && !changed.has(node.id)) applyProxy(engine, 'node/discovered', row)
             }
-            if (objectValue(status)?.ready === true) applyProxy(engine, 'ready', status)
+            const proxy = objectValue(status)
+            const port = proxy?.port
+            if (
+                proxy?.ready === true &&
+                typeof port === 'number' &&
+                Number.isInteger(port) &&
+                port > 0 &&
+                port <= 65535
+            ) {
+                applyProxy(engine, 'ready', { port })
+            }
         } finally {
             proxyChangesDuringBaseline.delete(engine)
         }
@@ -397,17 +401,11 @@ export function createOverviewProjection(client: Pick<JsonRpcSocketClient, 'call
             return handlers[channel](payload)
         },
         project,
+        setVisible: setNodeInfoPollerVisible,
         retire() {
             retired = true
+            detachPush()
             stopNodeInfoPoller()
-            for (const [engine, nodes] of proxyNodes) {
-                for (const params of [...nodes.values()]) applyProxy(engine, 'node/removed', params)
-            }
-            applyDiscovery({ nodes: [] })
-            performance.reset()
-            state.clearWorkloads()
-            state.replaceErrors([])
-            state.invalidateModelObservations()
         }
     }
 }
