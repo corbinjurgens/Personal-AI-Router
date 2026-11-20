@@ -7,6 +7,7 @@
         "src/electron/**/*",
         "src/preload/**/*",
         "src/shared/**/*",
+        "experiments/wails-overview/electron/**/*.ts",
         "electron-builder.config.ts",
         "scripts/windows-sign.js",
         "scripts/**/*.ts"

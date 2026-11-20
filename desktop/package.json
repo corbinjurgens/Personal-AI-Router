@@ -55,6 +55,7 @@
         "prebuild:electron": "npm run generate:icons && npm run licenses && npm run vendor:kaizen-css && npm run verify:build-scripts",
         "build:electron": "electron-vite build",
         "build:experiment:overview": "vite build --config experiments/wails-overview/vite.config.ts && node experiments/wails-overview/ui/asset-manifest.mjs",
+        "build:experiment:overview:electron": "npm run build:experiment:overview && node experiments/wails-overview/electron/build.mjs",
         "prebuild:renderer": "npm run vendor:kaizen-css",
         "build:renderer": "vite build --config vite.renderer.config.ts",
         "build:electron:win:x64": "npm run stage:vc-redist && npm run licenses && npm run build:modular-binaries:win:x64 -- --force && npm run build:collect-logs:win:x64 && electron-builder -c electron-builder.config.ts --win --x64 --publish never",

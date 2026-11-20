@@ -21,25 +21,9 @@ import { initializeNodeAvailability } from '@/ui/stores/node-configuration.store
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useWorkloadsStore } from '@/ui/stores/workloads.store'
 import type { HostInput } from './host-input'
+import { isOverviewRead, overviewBaselines } from './overview-reads'
 
 export type OverviewStatus = 'connecting' | 'ready' | 'unavailable'
-
-const baselines = new Set<WsInvokeChannel>([
-    'app:get-initial',
-    'cluster:get-initial',
-    'nodes:get-initial',
-    'engines:get-initial',
-    'workloads:get-initial',
-    'discovery:get-nodes',
-    'errors:get-initial'
-])
-const allowedReads = new Set<WsInvokeChannel>([
-    ...baselines,
-    'cluster:get-remote-management',
-    'engine:remote-management-get',
-    'engines:get-settings',
-    'policy:get'
-])
 
 function generationTransport(source: ServiceTransport) {
     const controller = new AbortController()
@@ -55,7 +39,7 @@ function generationTransport(source: ServiceTransport) {
         invoke<C extends WsInvokeChannel>(...args: ServiceInvokeArgs<C>) {
             const [channel] = args
             if (signal.aborted) return Promise.reject(retired)
-            if (!allowedReads.has(channel)) {
+            if (!isOverviewRead(channel)) {
                 return Promise.reject(new Error(`Overview is read-only: ${channel}`))
             }
             return new Promise<WsInvokeResponse<C>>((resolve, reject) => {
@@ -68,7 +52,7 @@ function generationTransport(source: ServiceTransport) {
                     })
                     .then(result => {
                         if (signal.aborted) throw retired
-                        if (baselines.has(channel)) {
+                        if (overviewBaselines.has(channel)) {
                             if (result == null)
                                 throw new Error(`Missing Overview baseline: ${channel}`)
                             received.add(channel)
@@ -101,7 +85,7 @@ function generationTransport(source: ServiceTransport) {
             source.destroy()
         }
     }
-    return { transport, ready: () => received.size === baselines.size, signal }
+    return { transport, ready: () => received.size === overviewBaselines.size, signal }
 }
 
 /** Full-state streams can retain the latest push while their stores subscribe after reading. */

@@ -53,6 +53,7 @@ From `desktop/` with Node 26 on PATH:
 
 ```sh
 npm run build:experiment:overview
+npm run build:experiment:overview:electron
 npx vitest run --project unit tests/experiments/wails-overview
 ```
 
@@ -84,6 +85,42 @@ live. It uses the production roster projection without joining, invite
 polling or permission mutations. The routing-attempt history stream and
 full-app error modal are outside the renderer's current input surface.
 
+The Electron command builds the shared bundle and packages an unpacked app for
+the current platform and architecture with the installed Electron runtime.
+It stages the app under `dist/electron-app/` and writes the package under
+`dist/electron/`. The build verifies every packaged renderer file against
+the manifest. The macOS package uses bundle ID
+`com.nvidia.pair.overview-experiment`. The app uses its own
+`PAIR Overview Experiment` directory under Electron's app-data root.
+
+On Apple Silicon, run the packaged replay from `desktop/`:
+
+```sh
+app="experiments/wails-overview/dist/electron/mac-arm64/PAIR Overview Experiment.app"
+env -u ELECTRON_RUN_AS_NODE open -n "$app" --args --mode=replay --scene=running-13
+```
+
+Use `--scene=idle`, `--scene=shared-node`, or `--scene=running-12` for
+the other fixtures. Add `--order=nodes-first` to change the column order.
+Use `--mode=live` to attach to the installed per-user PAIR service. Select
+**Overview** in the experiment tray menu to open a new window after closing
+it, or **Quit** to exit the experiment.
+
+## Window and tray operations
+
+Stock behavior is from `src/electron/{tray,window,window-visibility,main}.ts`,
+`src/electron/connector/index.ts`, and `src/electron/ipc/window.ipc.ts`.
+The Wails column gives the comparison contract for that host.
+
+| Operation | Stock Electron | Matched Electron | Wails target |
+| --- | --- | --- | --- |
+| Normal Quit | Tray Quit calls `app.quit()`. Cleanup destroys the tray and detaches the UI connector. The service keeps running. The stock tray has a separate **Stop background service and quit** action. | Native tray Quit exits the app and detaches any Overview socket. The service keeps running. | Native tray Quit exits the app and detaches Overview. The service keeps running. |
+| Close Overview | The title-bar action closes and destroys the Overview window. The tray and service connector remain. | The native close button destroys the window, its IPC handler, and its service attachment. The tray remains available. | Close destroys the Overview webview and dashboard attachment. The tray remains available. |
+| Show or hide popup | In popup mode a tray click opens or toggles the status popup. Blur hides an open popup after the initial show grace. The native menu can switch to menu-only mode. | The tray icon opens a native menu with Overview and Quit. | The tray icon exposes a native menu with Overview and Quit. |
+| Hidden renderer | A minimized or hidden Overview keeps its renderer. A closed Overview is destroyed. A hidden status popup keeps its renderer for up to 60 seconds, then is destroyed. Menu-only mode creates no popup renderer. | A minimized Overview keeps its renderer. Closing it destroys the renderer immediately. The tray menu creates no renderer. | Closing Overview destroys its renderer. The tray menu creates no renderer. |
+| View focus | Overview creation raises the view. Reopening an existing Overview shows and focuses it. The status popup takes focus on macOS and Windows. | Selecting Overview opens and raises a new window, or restores and focuses the current one. | Selecting Overview opens or focuses the view. |
+| Subscriptions | The app-wide bridge keeps its broker attachment and subscriptions through window close. Visible Overview or popup windows enable node-info polling. The private routing history has a separate renderer visibility and retirement lifecycle. | A live Overview owns its socket and subscriptions. Minimizing pauses node-info polling. Close detaches the client. Reopening subscribes and fetches fresh baselines. Service-wide streams can remain active for other clients. Replay uses fixture events. | A live Overview owns its dashboard attachment. Close detaches it. Reopen subscribes and resnapshots. Replay uses fixture events. |
+
 ## Live host input
 
 Set `mode=live` and expose `window.__PAIR_OVERVIEW_HOST__` before the entry
@@ -103,5 +140,16 @@ The required desktop baselines are `app:get-initial`, `cluster:get-initial`,
 `policy:get`, `cluster:get-remote-management`,
 `engine:remote-management-get`, and `engines:get-settings`. The renderer
 invoke allowlist rejects mutations before forwarding to either host. Stock
-card action affordances still need a read-only presentation mode in the
-components that own those controls.
+card action affordances remain visible and their mutations are refused. The
+matched Electron main process enforces the same allowlist independently of
+the renderer and rejects requests carrying a retired generation.
+
+The Electron attachment uses the installed service socket or named pipe
+resolved by the desktop's servicectl-compatible endpoint resolver. The
+window starts fresh discovery and proxy reads, engine and model reads,
+cluster, workload and error baselines, and the associated dashboard streams.
+It uses the production node-info poller for visible telemetry. Missing or
+failed baseline reads leave the view unavailable. Stock UI startup and
+mutation paths are outside the experiment, including cluster identity setup,
+manual-node migration, service startup, startup registration, and updates.
+The private routing-attempt history stream is omitted in both experiments.

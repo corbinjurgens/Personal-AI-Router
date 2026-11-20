@@ -4,6 +4,7 @@
         "src/electron/index.ts",
         "src/preload/index.ts",
         "src/ui/main.tsx",
+        "experiments/wails-overview/electron/{main.ts,preload.ts,build.mjs}",
         "scripts/*.ts",
         "electron.vite.config.ts",
         "electron-builder.config.ts",
@@ -16,7 +17,8 @@
         "src/preload/**/*.{ts,tsx}",
         "src/shared/**/*.{ts,tsx}",
         "src/ui/**/*.{ts,tsx}",
-        "scripts/**/*.{ts,js}"
+        "scripts/**/*.{ts,js}",
+        "experiments/wails-overview/electron/**/*.{ts,mjs}"
     ],
     "ignore": ["src/**/*.d.ts", "src/**/generated/**", "scripts/windows-sign.js"],
     "ignoreDependencies": ["@electron-toolkit/tsconfig", "postcss"],
