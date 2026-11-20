@@ -85,7 +85,10 @@ export default defineConfig({
                 extends: true,
                 test: {
                     name: 'unit',
-                    include: ['tests/modular/**/*.test.{ts,tsx}']
+                    include: [
+                        'tests/modular/**/*.test.{ts,tsx}',
+                        'tests/experiments/wails-overview/**/*.test.{ts,tsx}'
+                    ]
                 }
             },
             {

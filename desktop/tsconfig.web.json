@@ -6,7 +6,11 @@
         "src/shared/**/*",
         "src/preload/api/**/*.ts",
         "src/preload/*.d.ts",
-        "vite.renderer.config.ts"
+        "vite.renderer.config.ts",
+        "experiments/wails-overview/ui/**/*.ts",
+        "experiments/wails-overview/ui/**/*.tsx",
+        "experiments/wails-overview/vite.config.ts",
+        "scripts/vite-alias.ts"
     ],
     "exclude": ["src/electron/**"],
     "compilerOptions": {

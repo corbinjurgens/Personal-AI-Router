@@ -6,6 +6,8 @@
         "tests/modular/**/*.test.ts",
         "tests/modular/**/*.test.tsx",
         "tests/service-restart-reconnect/*.ts",
+        "tests/experiments/wails-overview/**/*.test.ts",
+        "tests/experiments/wails-overview/**/*.test.tsx",
         "vitest.config.ts",
         "scripts/test-clean.ts"
     ],
