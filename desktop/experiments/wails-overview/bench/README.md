@@ -159,6 +159,19 @@ invalidates the run and excludes its pair, with a reason naming the group and
 role. `gui/other` helpers may come and go, and their reported counters still
 contribute to GUI totals when present.
 
+Two capture caveats follow from this rule:
+
+- Boundary samples count as steady even when timer jitter places them slightly
+  outside `windowMs`. Let required processes settle before the earliest
+  allowed first sample, and keep them running past the final pass.
+  Otherwise a start or exit just outside the literal window still excludes
+  the pair.
+- `ps` on macOS reports creation times to the second. If a PID is reused
+  within the same second, the replacement looks like the same incarnation, so
+  this rule cannot detect it. Treat a renderer or helper restart seen in the
+  host's own logs or process trees as an invalid run, even when the analyzer
+  accepts it.
+
 Use
 `kind: "comparison"` for matched Electron versus Wails,
 `kind: "control"` for a same-arm noise pair and
