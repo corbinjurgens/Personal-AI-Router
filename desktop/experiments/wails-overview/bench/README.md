@@ -152,6 +152,13 @@ The sampling schedule starts at elapsed zero. Every scheduled slot inside
 time. The window must contain at least two slots. Collect padding before and
 after the window so boundary slots can tolerate timer jitter.
 
+Within each run, every steady sample must contain the same process incarnations
+(PID and canonical UTC creation time) for GUI `main`, `renderer` and `gpu`, all
+service roles and model engines. An appearance, disappearance or replacement
+invalidates the run and excludes its pair, with a reason naming the group and
+role. `gui/other` helpers may come and go, and their reported counters still
+contribute to GUI totals when present.
+
 Use
 `kind: "comparison"` for matched Electron versus Wails,
 `kind: "control"` for a same-arm noise pair and

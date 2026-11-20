@@ -42,6 +42,7 @@ const quantity = value => Number.isFinite(value) && value >= 0
 const pid = value => Number.isSafeInteger(value) && value > 0
 const counter = value => value === null || quantity(value)
 const label = value => typeof value === 'string' && value.length > 0
+const isUnclassifiedGui = row => row.group === 'gui' && row.role === 'other'
 
 function canonicalUtc(value) {
     if (typeof value !== 'string') return null
@@ -59,6 +60,17 @@ function identity(row) {
     if (!pid(row?.pid)) return null
     const createdUtc = canonicalUtc(row.createdUtc)
     return createdUtc && tuple(row.pid, createdUtc)
+}
+
+function requiredProcessSets(processes) {
+    const sets = new Map()
+    for (const row of processes) {
+        if (isUnclassifiedGui(row)) continue
+        const key = `${row.group}/${row.role}`
+        if (!sets.has(key)) sets.set(key, new Set())
+        sets.get(key).add(identity(row))
+    }
+    return sets
 }
 
 export function validateSample(sample) {
@@ -89,7 +101,7 @@ export function validateSample(sample) {
         )
             return 'invalid process record'
         // memoryBytes is the primary memory metric. Only unclassified GUI helpers may omit it.
-        if (row.memoryBytes === null && !(row.group === 'gui' && row.role === 'other'))
+        if (row.memoryBytes === null && !isUnclassifiedGui(row))
             return `missing memoryBytes for ${row.group}/${row.role}`
         seen.add(row.pid)
     }
@@ -280,6 +292,7 @@ function summarizeRun(run, base, { primaryScene, trayScene, activeScene }) {
     const lastProcess = new Map()
     const pidReuse = []
     let previous
+    let steadyProcessSets
     const expectedFence = fenceKey(run.fence?.before)
     if (!expectedFence || !fenceKey(run.fence?.after))
         issues.add('missing process/build/settings fence')
@@ -343,6 +356,24 @@ function summarizeRun(run, base, { primaryScene, trayScene, activeScene }) {
             slots.add(slot)
             if (sample.attributionClear === false)
                 issues.add('sampled process attribution ambiguous')
+            const currentProcessSets = requiredProcessSets(sample.processes)
+            steadyProcessSets ??= currentProcessSets
+            const processSetKeys = new Set([
+                ...steadyProcessSets.keys(),
+                ...currentProcessSets.keys()
+            ])
+            for (const key of processSetKeys) {
+                const expected = steadyProcessSets.get(key)
+                const current = currentProcessSets.get(key)
+                if (
+                    !expected ||
+                    !current ||
+                    expected.size !== current.size ||
+                    !expected.isSubsetOf(current)
+                ) {
+                    issues.add(`required process set changed during steady window: ${key}`)
+                }
+            }
             const gui = sample.processes.filter(row => row.group === 'gui')
             for (const role of requiredGuiRoles) {
                 if (!gui.some(row => row.role === role))

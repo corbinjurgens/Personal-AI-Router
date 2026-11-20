@@ -143,23 +143,6 @@ for (const os of ['windows', 'macos']) {
     })
 }
 
-test('PID reuse is reported and does not carry CPU history into the new process', () => {
-    const run = summary.runs.find(
-        row =>
-            row.os === 'windows' &&
-            row.scene === 'visible' &&
-            row.pair === 'a' &&
-            row.arm === 'wails'
-    )
-    assert.deepEqual(run.pidReuse, [expected.pidReuse])
-    assert.equal(run.issues.length, 0)
-    assert.deepEqual(run.process.gui.renderer.cpuMsPerSec, { median: 21, observed: 1 })
-    assert.deepEqual(run.process.gui.total.memoryBytes, { median: 167772160, observed: 3 })
-    assert.equal(run.process.model.total.memoryBytes.median, 536870912)
-    assert.equal(run.process.service.total.memoryBytes.median, 50331648)
-    assert.equal(run.system.pageInPerSec, 4)
-})
-
 for (const id of ['missing', 'invalid', 'restart']) {
     test(`${id} pair is excluded and retains its specific rejection reason`, () => {
         const pair = summary.pairs.find(row => row.id === id && row.scene === 'visible')
@@ -222,6 +205,141 @@ const visible = ({ run }) => run.os === 'windows' && run.scene === 'visible'
 const comparison = record => visible(record) && record.run.kind === 'comparison'
 const firstCandidate = runs =>
     runs.find(record => comparison(record) && record.run.pair === 'a' && record.run.arm === 'wails')
+const firstCandidateSummary = result =>
+    result.runs.find(run => run.os === 'windows' && run.order === 2)
+const firstVisiblePair = result =>
+    result.pairs.find(pair => pair.os === 'windows' && pair.scene === 'visible' && pair.id === 'a')
+
+test('PID reuse before the steady window is reported and keeps the run usable', () => {
+    const file = writeFixture(runs => {
+        const { run, samples } = firstCandidate(runs)
+        const padding = structuredClone(samples[0])
+        padding.timestamp = '2026-11-20T00:00:01.000Z'
+        padding.processes.find(row => row.role === 'renderer').createdUtc =
+            '2026-11-20T00:00:00.000Z'
+        for (const sample of samples) {
+            sample.elapsedMs += 1000
+            sample.timestamp = new Date(
+                Date.parse(padding.timestamp) + sample.elapsedMs
+            ).toISOString()
+        }
+        samples.unshift(padding)
+        run.windowMs = [1000, 3000]
+    })
+    const run = firstCandidateSummary(compare(file))
+    assert.deepEqual(run.pidReuse, [expected.pidReuse])
+    assert.deepEqual(run.issues, [])
+    assert.deepEqual(run.process.gui.renderer.cpuMsPerSec, { median: 21, observed: 1 })
+    assert.deepEqual(run.process.gui.total.memoryBytes, { median: 167772160, observed: 3 })
+    assert.equal(run.process.model.total.memoryBytes.median, 536870912)
+    assert.equal(run.process.service.total.memoryBytes.median, 50331648)
+    assert.equal(run.system.pageInPerSec, 4)
+})
+
+test('PID reuse inside the steady window excludes the pair even with the same renderer count', () => {
+    const file = writeFixture(runs => {
+        const [first, ...remaining] = firstCandidate(runs).samples
+        first.processes.find(row => row.role === 'renderer').createdUtc = first.timestamp
+        const replacementCreatedUtc = first.timestamp.replace('Z', '0001Z')
+        for (const sample of remaining) {
+            sample.processes.find(row => row.role === 'renderer').createdUtc = replacementCreatedUtc
+        }
+    })
+    const result = compare(file)
+    assert.deepEqual(firstCandidateSummary(result).issues, [
+        'required process set changed during steady window: gui/renderer'
+    ])
+    assert.deepEqual(firstVisiblePair(result).deltas, {})
+})
+
+function twoRendererComparison(edit) {
+    return compare(
+        writeFixture(runs => {
+            const baseline = runs.find(
+                record =>
+                    comparison(record) &&
+                    record.run.pair === 'a' &&
+                    record.run.arm === 'matched-electron'
+            )
+            const candidate = firstCandidate(runs)
+            for (const [index, sample] of baseline.samples.entries()) {
+                const renderer = sample.processes.find(row => row.role === 'renderer')
+                sample.processes.push({ ...renderer, pid: 22, memoryBytes: 128 * 1024 ** 2 })
+                candidate.samples[index].processes = sample.processes.map(row => ({
+                    ...row,
+                    pid: row.pid === 22 ? 23 : row.pid
+                }))
+            }
+            edit(candidate.samples)
+        })
+    )
+}
+
+test('a second renderer exiting during the steady window cannot count as a memory saving', () => {
+    const result = twoRendererComparison(samples => {
+        for (const sample of samples.slice(1)) {
+            sample.processes = sample.processes.filter(row => row.pid !== 23)
+        }
+    })
+    const pair = firstVisiblePair(result)
+    assert.deepEqual(pair.deltas, {})
+    assert.equal(pair.counterDifferences, null)
+    assert.deepEqual(pair.reasons, [
+        'wails #2: required process set changed during steady window: gui/renderer'
+    ])
+    assert.ok(
+        !result.platforms.windows.metrics.visibleMemoryMiB.deltas.some(row => row.pair === 'a')
+    )
+})
+
+test('two stable renderers per arm contribute to a valid comparison', () => {
+    const result = twoRendererComparison(samples => samples[1].processes.reverse())
+    const pair = firstVisiblePair(result)
+    assert.deepEqual(pair.reasons, [])
+    assert.equal(pair.deltas.visibleMemoryMiB, 0)
+    assert.deepEqual(firstCandidateSummary(result).process.gui.renderer.memoryBytes, {
+        median: 148 * 1024 ** 2,
+        observed: 3
+    })
+})
+
+test('a gui/other helper appearing during the steady window contributes to a valid comparison', () => {
+    const result = twoRendererComparison(samples => {
+        for (const sample of samples.slice(1)) {
+            const renderer = sample.processes.find(row => row.role === 'renderer')
+            sample.processes.push({
+                ...renderer,
+                pid: 24,
+                role: 'other',
+                memoryBytes: 32 * 1024 ** 2
+            })
+        }
+    })
+    const pair = firstVisiblePair(result)
+    assert.deepEqual(pair.reasons, [])
+    assert.equal(pair.deltas.visibleMemoryMiB, -32)
+})
+
+for (const [group, role] of [
+    ['gui', 'gpu'],
+    ['service', 'worker'],
+    ['model', 'engine']
+]) {
+    test(`a ${group}/${role} appearing during the steady window excludes the pair`, () => {
+        const file = writeFixture(runs => {
+            const { samples } = firstCandidate(runs)
+            for (const sample of samples.slice(1)) {
+                const process = sample.processes.find(row => row.group === group)
+                sample.processes.push({ ...process, pid: 22, role })
+            }
+        })
+        const result = compare(file)
+        assert.deepEqual(firstCandidateSummary(result).issues, [
+            `required process set changed during steady window: ${group}/${role}`
+        ])
+        assert.deepEqual(firstVisiblePair(result).deltas, {})
+    })
+}
 
 test('two adjacent seconds cannot stand in for a five-minute steady window', () => {
     const result = compare(
@@ -535,7 +653,7 @@ test('inference joins equivalent process timestamps and distinguishes 100 ns', (
     })
     assert.equal(run.outcome.tokensPerSecond, 21)
     assert.equal(run.outcome.firstTokenMs, 110)
-    assert.deepEqual(run.pidReuse, [expected.pidReuse])
+    assert.deepEqual(run.pidReuse, [])
     assert.equal(result.platforms.windows.verdict, 'material-win')
 })
 
