@@ -111,8 +111,9 @@ It contains one pair per OS and produces an inconclusive verdict. The tests
 generate a complete synthetic matrix with independent capture timestamps.
 Use a separate raw file for each run. The analyzer rejects every occurrence
 of a repeated capture identity across pairs and arms. The identity hashes the
-normalized parsed observations, so a different filename, UTF-8 BOM or line
-ending does not make a capture independent. The `captureSha256` field retains
+normalized parsed observations, with process rows ordered by PID, so a
+different filename, UTF-8 BOM, line ending or process row order does not make
+a capture independent. The `captureSha256` field retains
 the SHA-256 of the original bytes for provenance.
 Record before and after fences for each
 run using the observed service and broker PID and creation time, redacted
@@ -195,7 +196,9 @@ passed in `winCriteria`.
 Guardrail tolerances are 100 MiB for visible memory, 5 percentage points
 for missed frames, 5% for throughput, 10% for first-token latency, 250 ms for
 warm reopen, and 50 MiB for tray memory. Each decisive pair must stay within
-the larger of the tolerance and its metric's observed noise. The
+the tolerance, a fixed ceiling. A breach that the observed noise can explain
+makes the result inconclusive; a median loss beyond both the tolerance and
+the noise is a regression. The
 `withinRegressionTolerance` field is null when measurements or controls are
 missing. Mixed visible memory deltas within the limit still allow the GUI
 demand and outcome criterion to win. The overall OS verdict requires at

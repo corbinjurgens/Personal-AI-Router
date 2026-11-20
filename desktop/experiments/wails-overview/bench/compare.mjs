@@ -132,10 +132,12 @@ function canonicalObservation(sample) {
         {
             ...sample,
             timestamp: canonicalUtc(sample.timestamp),
-            processes: sample.processes.map(row => ({
-                ...row,
-                createdUtc: canonicalUtc(row.createdUtc)
-            }))
+            processes: sample.processes
+                .map(row => ({
+                    ...row,
+                    createdUtc: canonicalUtc(row.createdUtc)
+                }))
+                .sort((a, b) => a.pid - b.pid)
         },
         sortObjectKeys
     )
@@ -609,8 +611,10 @@ function evaluate(metric, comparisons, controls) {
         deltas
     }
     if (middle === null || noise === null || values.length !== deltas.length) return result
+    // The pre-registered tolerance is a fixed ceiling; noise only decides
+    // whether a breach is a confirmed regression or an inconclusive result.
     const limit = Math.max(threshold, noise)
-    result.withinRegressionTolerance = values.every(value => value >= -limit)
+    result.withinRegressionTolerance = values.every(value => value >= -threshold)
     const thresholdMet = improvementMetrics.includes(metric)
         ? middle >= threshold - 1e-12
         : middle > threshold

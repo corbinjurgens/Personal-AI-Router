@@ -331,6 +331,27 @@ test('a UTF-8 BOM and CRLF do not make a reused capture independent', () => {
     }
 })
 
+test('reordered process rows do not make a reused capture independent', () => {
+    const file = writeFixture(runs => {
+        const reused = runs.find(
+            record => comparison(record) && record.run.pair === 'b' && record.run.arm === 'wails'
+        )
+        reused.samples = structuredClone(firstCandidate(runs).samples).map(sample => ({
+            ...sample,
+            processes: [...sample.processes].reverse()
+        }))
+    })
+    const result = compare(file)
+    assert.equal(result.platforms.windows.verdict, 'inconclusive')
+    for (const id of ['a', 'b']) {
+        const pair = result.pairs.find(
+            pair => pair.os === 'windows' && pair.scene === 'visible' && pair.id === id
+        )
+        assert.deepEqual(pair.deltas, {})
+        assert.ok(pair.reasons.some(reason => reason.endsWith('raw capture reused')))
+    }
+})
+
 for (const replaced of [['matched-electron', 'wails'], ['wails']]) {
     test(`stock noise cannot substitute for ${replaced.join(' or ')} controls`, () => {
         const file = writeFixture(runs => {
@@ -536,18 +557,28 @@ for (const [resource, outcome, metric, gain] of [
     })
 }
 
-for (const [scenario, memoryLossMiB, verdict, winCriteria] of [
+for (const [scenario, memoryLossMiB, verdict, winCriteria, memoryNoiseMiB = 0] of [
     [
         'one pair loses 4 MiB',
         4,
         'material-win',
         [{ metric: 'guiCpuMsPerSec', outcome: 'tokensPerSecondPercent' }]
     ],
-    ['one pair loses 101 MiB', 101, 'inconclusive', []]
+    ['one pair loses 101 MiB', 101, 'inconclusive', []],
+    ['one pair loses 101 MiB within 120 MiB of control noise', 101, 'inconclusive', [], 120]
 ]) {
     test(`CPU and throughput verdict when ${scenario}`, () => {
         const file = writeFixture(runs => {
             resourceWin(runs, { resource: 'cpuMsPerSec', outcome: 'tokens' })
+            for (const { run, samples } of runs.filter(visible)) {
+                if (run.kind !== 'control' || run.order !== 6) continue
+                for (const sample of samples) {
+                    const main = sample.processes.find(
+                        row => row.group === 'gui' && row.role === 'main'
+                    )
+                    if (main) main.memoryBytes += memoryNoiseMiB * 1024 ** 2
+                }
+            }
             for (const { run, samples } of runs.filter(comparison)) {
                 const memoryMiB =
                     run.arm === 'matched-electron'
