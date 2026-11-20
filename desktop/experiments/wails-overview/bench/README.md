@@ -32,6 +32,19 @@ $model = '\\runner\.exe(?:[" ]|$)'
 node "$bench/compare.mjs" --validate-samples "$evidence\visible-01.jsonl"
 ```
 
+The Windows sampler reads raw performance data with one CIM query per class
+and computes rates from consecutive passes, so it has no `Get-Counter`
+two-collection delay. On White (Windows 11 10.0.26300, about 340 processes)
+one pass took about 0.5 s with the GUI, service and model groups selected, and
+a 30-second run at `-IntervalSeconds 1` kept every sample within 22 ms of its
+slot. One second is the shortest supported interval. Check slot coverage on
+each new host before relying on it.
+
+`--validate-samples` rejects a sample in which a classified process has no
+`memoryBytes`: GUI `main`, `renderer` and `gpu`, every service role and the
+model `engine`. Only unclassified GUI helpers (`gui/other`) may omit it.
+`compare.mjs` applies the same rule to every raw file in a manifest.
+
 Pass `-GuiName @('PAIR', 'AnotherMain')` for image names without `.exe`.
 `-HelperPattern` can include verified out-of-tree helpers. On Windows the
 helper, renderer, GPU and model expressions match executable path and command
@@ -75,6 +88,8 @@ remainder in `gui/other`.
 The samplers only observe. They omit paths, command lines, request payloads,
 machine names and model names from output. A missed timer slot stays missing;
 inspect timestamps and window coverage before treating a run as representative.
+A process that exits during a pass is omitted from that sample, because its
+counters are missing and its PID could already name another process.
 Processes that finish between samples or that already detached before observation
 require separate attribution evidence.
 
@@ -83,17 +98,19 @@ require separate attribution evidence.
 Each JSONL line is a schema 1 sample with `os`, UTC `timestamp`, monotonic
 `elapsedMs`, `processes` and `system`. Each process has a PID, UTC
 `createdUtc`, a `group` and a `role`. Unknown or unavailable counters are
-`null`. A PID with a new creation time is a new process.
+`null`. A PID with a new creation time is a new process. Rate fields
+(`cpuMsPerSec`, `cpuPercentOneCore`, `gpuEnginePercent` and Windows paging rates)
+are `null` in a process's first sample, because they need a previous pass.
 
-| Field                                 | Windows                                                                                                           | macOS                                                                                                                             |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `memoryBytes`                         | `Process V2` or `Process` **Working Set - Private**, matched using **ID Process** between creation-time snapshots | `top -l 1 -stats pid,mem` **MEM**, the process physical footprint, rounded at the precision printed by `top`                      |
-| `commitBytes`                         | **Private Bytes**, private committed address space                                                                | Unknown                                                                                                                           |
-| `cpuMsPerSec`                         | Delta of CIM **KernelModeTime + UserModeTime** divided by actual elapsed time                                     | Delta of cumulative **ps -o time=** divided by actual elapsed time                                                                |
-| `cpuPercentOneCore`                   | Cooked **% Processor Time**, with 100% equal to one busy core                                                     | Unknown. Use the cumulative CPU delta                                                                                             |
-| `gpuEnginePercent`                    | Sum of per-PID **GPU Engine / Utilization Percentage** instances, across engines. Can exceed 100                  | Unknown                                                                                                                           |
-| `gpuDedicatedBytes`, `gpuSharedBytes` | Per-PID sums of **GPU Process Memory / Dedicated Usage** and **Shared Usage**                                     | Unknown                                                                                                                           |
-| System memory and paging              | **Memory / Available Bytes**, **Pages Input/sec**, **Pages Output/sec**, and OS page size                         | `vm_stat` page size, cumulative page-ins, page-outs, swap-ins and swap-outs, and `memory_pressure -Q` system-wide free percentage |
+| Field                                 | Windows                                                                                                                                                                                                                                                                                                                         | macOS                                                                                                                             |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `memoryBytes`                         | Raw **Working Set - Private** from `Win32_PerfRawData_Counters_ProcessV2` (Process V2), whose instance name `<image>:<pid>` gives the PID. Without Process V2, `Win32_PerfRawData_PerfProc_Process` and its **ID Process** counter. Counters join a process only when its PID and creation time match before and after the pass | `top -l 1 -stats pid,mem` **MEM**, the process physical footprint, rounded at the precision printed by `top`                      |
+| `commitBytes`                         | Raw **Private Bytes** from the same process class, private committed address space                                                                                                                                                                                                                                              | Unknown                                                                                                                           |
+| `cpuMsPerSec`                         | Delta of CIM **KernelModeTime + UserModeTime** divided by actual elapsed time                                                                                                                                                                                                                                                   | Delta of cumulative **ps -o time=** divided by actual elapsed time                                                                |
+| `cpuPercentOneCore`                   | Delta of raw **% Processor Time** over the delta of its 100 ns timestamp, with 100% equal to one busy core                                                                                                                                                                                                                      | Unknown. Use the cumulative CPU delta                                                                                             |
+| `gpuEnginePercent`                    | Sum over the PID's `Win32_PerfRawData_GPUPerformanceCounters_GPUEngine` instances of the raw **Utilization Percentage** delta over its 100 ns timestamp delta. Can exceed 100                                                                                                                                                   | Unknown                                                                                                                           |
+| `gpuDedicatedBytes`, `gpuSharedBytes` | Per-PID sums of raw **Dedicated Usage** and **Shared Usage** from `GPUProcessMemory`                                                                                                                                                                                                                                            | Unknown                                                                                                                           |
+| System memory and paging              | Raw **Available Bytes**, and **Pages Input/sec** and **Pages Output/sec** as deltas over the performance-counter time, from `Win32_PerfRawData_PerfOS_Memory`, and OS page size                                                                                                                                                 | `vm_stat` page size, cumulative page-ins, page-outs, swap-ins and swap-outs, and `memory_pressure -Q` system-wide free percentage |
 
 Windows private working sets exclude shareable pages. macOS physical footprint
 is the kernel's per-task charge, which can include compressed memory and

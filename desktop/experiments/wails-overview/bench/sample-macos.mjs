@@ -261,16 +261,18 @@ async function sample() {
         const after = snapshot()
         const current = [...selected.keys()].map(pid => rows.get(pid))
         const cpu = cpuDeltas(previous, current, elapsedMs - previousMs)
-        const processes = current.map((row, index) => {
+        // A process that exited during the pass has no counters for this sample.
+        // Its PID could already name another process, so the row is omitted.
+        const processes = current.flatMap((row, index) => {
             const { pid, createdUtc } = row
             const { group, role } = selected.get(pid)
-            const stillPresent = after.has(pid) && key(after.get(pid)) === key(row)
+            if (!after.has(pid) || key(after.get(pid)) !== key(row)) return []
             return {
                 pid,
                 createdUtc,
                 group,
                 role,
-                memoryBytes: stillPresent ? (memory.get(pid) ?? null) : null,
+                memoryBytes: memory.get(pid) ?? null,
                 cpuMsPerSec: cpu[index],
                 cpuPercentOneCore: null,
                 commitBytes: null,

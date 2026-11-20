@@ -59,86 +59,94 @@ function Add-Descendants($snapshot, $selected) {
     } while ($added)
 }
 
-function Read-Counters([string[]]$paths) {
-    try {
-        # A disappearing instance can leave valid sibling samples in the response.
-        $query = Get-Counter -Counter $paths -ErrorAction SilentlyContinue
-        if ($query) { $query.CounterSamples }
-    } catch {
-        # Unsupported counters are unknown.
-    }
+# Raw performance data comes from one CIM query per class. Get-Counter cooks rate
+# counters from two collections a second apart, which made one pass take 10-15 s.
+function Read-Raw([string]$class, [string[]]$properties) {
+    try { return @(Get-CimInstance -ClassName $class -Property $properties) } catch { return @() }
 }
 
-function Counter-Value($sample) {
-    if ($null -ne $sample -and $sample.Status -in @(0, 1) -and
-        $sample.CookedValue -ge 0 -and ![double]::IsInfinity($sample.CookedValue)) {
-        return $sample.CookedValue
+# Rate of a raw counter between this pass and the previous pass of the same key.
+# The first observation of a key, a counter reset or a missing value is unknown.
+function Get-Rate($previous, $key, $value, $time, [double]$scale) {
+    $rate = $null
+    $last = $previous[$key]
+    if ($null -ne $last -and $null -ne $value -and $time -gt $last.time -and $value -ge $last.value) {
+        $rate = ($value - $last.value) * $scale / ($time - $last.time)
     }
-    return $null
+    return $rate
 }
 
-function Read-ProcessCounters($category) {
-    $instances = @{}
-    $paths = @('ID Process', 'Working Set - Private', 'Private Bytes', '% Processor Time') |
-        ForEach-Object { "\$category(*)\$_" }
-    foreach ($sample in Read-Counters $paths) {
-        if ($sample.Path -notmatch '\\([^\\]+)$') { continue }
-        $name = $Matches[1]
-        $instance = $sample.Path.Substring(0, $sample.Path.LastIndexOf('\'))
-        if (!$instances.ContainsKey($instance)) { $instances[$instance] = @{} }
-        $instances[$instance][$name] = Counter-Value $sample
-    }
+# Process V2 names instances '<image>:<pid>' and has no ID Process counter. The
+# legacy Process set names instances '<image>#<n>' and carries ID Process.
+function Read-ProcessCounters {
     $byPid = @{}
     $ambiguous = @{}
-    foreach ($item in $instances.Values) {
-        if ($item['ID Process'] -gt 0) {
-            $id = [int]$item['ID Process']
-            if ($byPid.ContainsKey($id)) { $ambiguous[$id] = $true }
-            $byPid[$id] = $item
+    $properties = @('Name', 'WorkingSetPrivate', 'PrivateBytes', 'PercentProcessorTime', 'Timestamp_Sys100NS')
+    if ($processV2) {
+        $rows = Read-Raw 'Win32_PerfRawData_Counters_ProcessV2' $properties
+    } else {
+        $rows = Read-Raw 'Win32_PerfRawData_PerfProc_Process' ($properties + 'IDProcess')
+    }
+    foreach ($row in $rows) {
+        if ($processV2) {
+            if ($row.Name -notmatch ':(\d+)$') { continue }
+            $id = [int]$Matches[1]
+        } else {
+            $id = [int]$row.IDProcess
         }
+        if ($id -le 0) { continue }
+        if ($byPid.ContainsKey($id)) { $ambiguous[$id] = $true }
+        $byPid[$id] = $row
     }
     foreach ($id in $ambiguous.Keys) { $byPid.Remove($id) }
     return $byPid
 }
 
 function Read-GpuCounters {
-    $byPid = @{}
-    $paths = @('\GPU Engine(*)\Utilization Percentage',
-        '\GPU Process Memory(*)\Dedicated Usage', '\GPU Process Memory(*)\Shared Usage')
-    foreach ($path in $paths) {
-        foreach ($sample in Read-Counters @($path)) {
-            if ($sample.InstanceName -notmatch '(?:^|_)pid_(\d+)(?:_|$)') { continue }
-            $id = [int]$Matches[1]
-            if (!$byPid.ContainsKey($id)) { $byPid[$id] = @{} }
-            $name = $path.Substring($path.LastIndexOf('\') + 1)
-            $value = Counter-Value $sample
-            $row = $byPid[$id]
-            if (!$row.ContainsKey($name)) { $row[$name] = $value }
-            elseif ($null -eq $value -or $null -eq $row[$name]) { $row[$name] = $null }
-            else { $row[$name] += $value }
-        }
+    $engines = @{}
+    foreach ($row in Read-Raw 'Win32_PerfRawData_GPUPerformanceCounters_GPUEngine' @('Name', 'UtilizationPercentage', 'Timestamp_Sys100NS')) {
+        if ($row.Name -notmatch '(?:^|_)pid_(\d+)(?:_|$)') { continue }
+        $id = [int]$Matches[1]
+        if (!$engines.ContainsKey($id)) { $engines[$id] = @() }
+        $engines[$id] += $row
     }
-    return $byPid
+    $memory = @{}
+    foreach ($row in Read-Raw 'Win32_PerfRawData_GPUPerformanceCounters_GPUProcessMemory' @('Name', 'DedicatedUsage', 'SharedUsage')) {
+        if ($row.Name -notmatch '(?:^|_)pid_(\d+)(?:_|$)') { continue }
+        $id = [int]$Matches[1]
+        if (!$memory.ContainsKey($id)) { $memory[$id] = @{dedicated=0.0; shared=0.0} }
+        $memory[$id].dedicated += [double]$row.DedicatedUsage
+        $memory[$id].shared += [double]$row.SharedUsage
+    }
+    return @{engines=$engines; memory=$memory}
 }
 
-function Read-SystemCounters {
-    $values = @{}
-    $paths = @('\Memory\Available Bytes', '\Memory\Pages Input/sec', '\Memory\Pages Output/sec')
-    foreach ($sample in Read-Counters $paths) {
-        $values[$sample.Path.Substring($sample.Path.LastIndexOf('\') + 1)] = Counter-Value $sample
+function Read-SystemCounters($previous) {
+    $values = @{availableBytes=$null; pageInPerSec=$null; pageOutPerSec=$null}
+    $row = Read-Raw 'Win32_PerfRawData_PerfOS_Memory' @('AvailableBytes', 'PagesInputPersec', 'PagesOutputPersec',
+        'Timestamp_PerfTime', 'Frequency_PerfTime') | Select-Object -First 1
+    if ($row -and $row.Frequency_PerfTime -gt 0) {
+        $time = [double]$row.Timestamp_PerfTime
+        $scale = [double]$row.Frequency_PerfTime
+        $values.availableBytes = [double]$row.AvailableBytes
+        $values.pageInPerSec = Get-Rate $previous 'pageIn' ([double]$row.PagesInputPersec) $time $scale
+        $values.pageOutPerSec = Get-Rate $previous 'pageOut' ([double]$row.PagesOutputPersec) $time $scale
+        $previous['pageIn'] = @{value=[double]$row.PagesInputPersec; time=$time}
+        $previous['pageOut'] = @{value=[double]$row.PagesOutputPersec; time=$time}
     }
     return @{
-        availableBytes=$values['Available Bytes']; pageInPerSec=$values['Pages Input/sec']
-        pageOutPerSec=$values['Pages Output/sec']; pageSizeBytes=[Environment]::SystemPageSize
+        availableBytes=$values.availableBytes; pageInPerSec=$values.pageInPerSec
+        pageOutPerSec=$values.pageOutPerSec; pageSizeBytes=[Environment]::SystemPageSize
         pageInCount=$null; pageOutCount=$null; swapInCount=$null; swapOutCount=$null; pressureFreePercent=$null
     }
 }
 
-$category = 'Process'
-if (Get-Counter -ListSet 'Process V2' -ErrorAction SilentlyContinue) { $category = 'Process V2' }
+$processV2 = [bool](Get-CimClass -ClassName 'Win32_PerfRawData_Counters_ProcessV2' -ErrorAction SilentlyContinue)
 $known = @{}
 $previous = @{}
 $previousMs = 0
+$previousRaw = @{}
+$systemRaw = @{}
 $intervalMs = $IntervalSeconds * 1000
 $durationMs = $DurationSeconds * 1000
 $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -173,33 +181,55 @@ for ($next = 0; $next -lt $durationMs;) {
         }
     }
     Add-Descendants $before $selected
-    $perf = Read-ProcessCounters $category
-    $gpuCounters = Read-GpuCounters
+    $perf = Read-ProcessCounters
+    $gpu = Read-GpuCounters
+    $system = Read-SystemCounters $systemRaw
     $after = Get-ProcessSnapshot
     $known = @{}
     $current = @{}
+    $raw = @{}
     $rows = @(foreach ($id in $selected.Keys) {
         $attribution = $selected[$id]
         if ($attribution.group -eq 'observer') { continue }
         $row = $before[$id]
         $key = '{0}/{1}' -f $id,$row.createdUtc
-        $stable = $after.ContainsKey($id) -and $after[$id].createdUtc -ceq $row.createdUtc
+        # A process that exited during the pass has no counters for this sample.
+        # Its PID could already name another process, so the row is omitted.
+        if (!$after.ContainsKey($id) -or $after[$id].createdUtc -cne $row.createdUtc) { continue }
         $cpu = $null
         if ($previous.ContainsKey($key) -and $row.cpuSeconds -ge $previous[$key]) {
             $cpu = ($row.cpuSeconds - $previous[$key]) * 1000000 / ($elapsedMs - $previousMs)
         }
         $known[$key] = $attribution
         $current[$key] = $row.cpuSeconds
-        $processPerf = @{}
-        $processGpu = @{}
-        if ($stable -and $perf.ContainsKey($id)) { $processPerf = $perf[$id] }
-        if ($stable -and $gpuCounters.ContainsKey($id)) { $processGpu = $gpuCounters[$id] }
+        $memory = $null; $commit = $null; $cpuPercent = $null
+        if ($perf.ContainsKey($id)) {
+            $counter = $perf[$id]
+            $memory = [double]$counter.WorkingSetPrivate
+            $commit = [double]$counter.PrivateBytes
+            $time = [double]$counter.Timestamp_Sys100NS
+            $cpuPercent = Get-Rate $previousRaw "$key/cpu" ([double]$counter.PercentProcessorTime) $time 100
+            $raw["$key/cpu"] = @{value=[double]$counter.PercentProcessorTime; time=$time}
+        }
+        $gpuPercent = $null
+        if ($gpu.engines.ContainsKey($id)) {
+            $gpuPercent = 0.0
+            foreach ($engine in $gpu.engines[$id]) {
+                $engineKey = "$key/gpu/$($engine.Name)"
+                $time = [double]$engine.Timestamp_Sys100NS
+                $rate = Get-Rate $previousRaw $engineKey ([double]$engine.UtilizationPercentage) $time 100
+                $raw[$engineKey] = @{value=[double]$engine.UtilizationPercentage; time=$time}
+                if ($null -eq $rate -or $null -eq $gpuPercent) { $gpuPercent = $null } else { $gpuPercent += $rate }
+            }
+        }
+        $gpuMemory = $gpu.memory[$id]
         @{
             pid=$id; createdUtc=$row.createdUtc; group=$attribution.group; role=$attribution.role
-            memoryBytes=$processPerf['Working Set - Private']; commitBytes=$processPerf['Private Bytes']
-            cpuMsPerSec=$cpu; cpuPercentOneCore=$processPerf['% Processor Time']
-            gpuEnginePercent=$processGpu['Utilization Percentage']; gpuDedicatedBytes=$processGpu['Dedicated Usage']
-            gpuSharedBytes=$processGpu['Shared Usage']
+            memoryBytes=$memory; commitBytes=$commit
+            cpuMsPerSec=$cpu; cpuPercentOneCore=$cpuPercent
+            gpuEnginePercent=$gpuPercent
+            gpuDedicatedBytes=$(if ($gpuMemory) { $gpuMemory.dedicated } else { $null })
+            gpuSharedBytes=$(if ($gpuMemory) { $gpuMemory.shared } else { $null })
         }
     })
     # Processes may appear after the initial wall timestamp but before CIM enumerates them.
@@ -209,10 +239,11 @@ for ($next = 0; $next -lt $durationMs;) {
     }
     @{
         schema=1; os='windows'; elapsedMs=$elapsedMs; timestamp=$timestamp.ToString("yyyy-MM-ddTHH:mm:ss.ffffff'Z'")
-        processes=$rows; system=(Read-SystemCounters)
+        processes=$rows; system=$system
     } | ConvertTo-Json -Depth 5 -Compress
     $previousMs = $elapsedMs
     $previous = $current
+    $previousRaw = $raw
     $next += $intervalMs
     while ($next -lt $clock.ElapsedMilliseconds) { $next += $intervalMs }
 }

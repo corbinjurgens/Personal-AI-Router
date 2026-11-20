@@ -185,6 +185,39 @@ test('raw schema validation fails the CLI on the invalid sample', () => {
     assert.equal(invalid.stderr.trim(), expected.rejected.invalid)
 })
 
+test('sample validation requires memory for every classified process', async t => {
+    const [line] = readFileSync(path('fixtures/windows-baseline.txt'), 'utf8').split(/\r?\n/)
+    const validate = sample =>
+        spawnSync(process.execPath, [path('compare.mjs'), '--validate-samples', '-'], {
+            encoding: 'utf8',
+            input: `${JSON.stringify(sample)}\n`
+        })
+    const withRow = (group, role, memoryBytes) => {
+        const sample = JSON.parse(line)
+        sample.processes.push({ ...sample.processes[0], pid: 99, group, role, memoryBytes })
+        return sample
+    }
+    for (const [group, role] of [
+        ['gui', 'main'],
+        ['gui', 'renderer'],
+        ['gui', 'gpu'],
+        ['service', 'service'],
+        ['service', 'broker'],
+        ['service', 'worker'],
+        ['model', 'engine']
+    ]) {
+        await t.test(`${group}/${role} without memoryBytes is rejected`, () => {
+            const result = validate(withRow(group, role, null))
+            assert.equal(result.status, 1)
+            assert.equal(result.stderr.trim(), `line 1: missing memoryBytes for ${group}/${role}`)
+        })
+    }
+    await t.test('an unclassified GUI helper may omit memoryBytes', () => {
+        const result = validate(withRow('gui', 'other', null))
+        assert.equal(result.status, 0, result.stderr)
+    })
+})
+
 const visible = ({ run }) => run.os === 'windows' && run.scene === 'visible'
 const comparison = record => visible(record) && record.run.kind === 'comparison'
 const firstCandidate = runs =>

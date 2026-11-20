@@ -88,6 +88,9 @@ export function validateSample(sample) {
             !counters.every(key => counter(row[key]))
         )
             return 'invalid process record'
+        // memoryBytes is the primary memory metric. Only unclassified GUI helpers may omit it.
+        if (row.memoryBytes === null && !(row.group === 'gui' && row.role === 'other'))
+            return `missing memoryBytes for ${row.group}/${row.role}`
         seen.add(row.pid)
     }
     return null
