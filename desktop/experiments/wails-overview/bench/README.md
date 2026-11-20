@@ -85,15 +85,15 @@ Each JSONL line is a schema 1 sample with `os`, UTC `timestamp`, monotonic
 `createdUtc`, a `group` and a `role`. Unknown or unavailable counters are
 `null`. A PID with a new creation time is a new process.
 
-| Field | Windows | macOS |
-| --- | --- | --- |
-| `memoryBytes` | `Process V2` or `Process` **Working Set - Private**, matched using **ID Process** between creation-time snapshots | `top -l 1 -stats pid,mem` **MEM**, the process physical footprint, rounded at the precision printed by `top` |
-| `commitBytes` | **Private Bytes**, private committed address space | Unknown |
-| `cpuMsPerSec` | Delta of CIM **KernelModeTime + UserModeTime** divided by actual elapsed time | Delta of cumulative **ps -o time=** divided by actual elapsed time |
-| `cpuPercentOneCore` | Cooked **% Processor Time**, with 100% equal to one busy core | Unknown. Use the cumulative CPU delta |
-| `gpuEnginePercent` | Sum of per-PID **GPU Engine / Utilization Percentage** instances, across engines. Can exceed 100 | Unknown |
-| `gpuDedicatedBytes`, `gpuSharedBytes` | Per-PID sums of **GPU Process Memory / Dedicated Usage** and **Shared Usage** | Unknown |
-| System memory and paging | **Memory / Available Bytes**, **Pages Input/sec**, **Pages Output/sec**, and OS page size | `vm_stat` page size, cumulative page-ins, page-outs, swap-ins and swap-outs, and `memory_pressure -Q` system-wide free percentage |
+| Field                                 | Windows                                                                                                           | macOS                                                                                                                             |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `memoryBytes`                         | `Process V2` or `Process` **Working Set - Private**, matched using **ID Process** between creation-time snapshots | `top -l 1 -stats pid,mem` **MEM**, the process physical footprint, rounded at the precision printed by `top`                      |
+| `commitBytes`                         | **Private Bytes**, private committed address space                                                                | Unknown                                                                                                                           |
+| `cpuMsPerSec`                         | Delta of CIM **KernelModeTime + UserModeTime** divided by actual elapsed time                                     | Delta of cumulative **ps -o time=** divided by actual elapsed time                                                                |
+| `cpuPercentOneCore`                   | Cooked **% Processor Time**, with 100% equal to one busy core                                                     | Unknown. Use the cumulative CPU delta                                                                                             |
+| `gpuEnginePercent`                    | Sum of per-PID **GPU Engine / Utilization Percentage** instances, across engines. Can exceed 100                  | Unknown                                                                                                                           |
+| `gpuDedicatedBytes`, `gpuSharedBytes` | Per-PID sums of **GPU Process Memory / Dedicated Usage** and **Shared Usage**                                     | Unknown                                                                                                                           |
+| System memory and paging              | **Memory / Available Bytes**, **Pages Input/sec**, **Pages Output/sec**, and OS page size                         | `vm_stat` page size, cumulative page-ins, page-outs, swap-ins and swap-outs, and `memory_pressure -Q` system-wide free percentage |
 
 Windows private working sets exclude shareable pages. macOS physical footprint
 is the kernel's per-task charge, which can include compressed memory and

@@ -1,373 +1,305 @@
 {
-  "SPDX-FileCopyrightText": "Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
-  "SPDX-License-Identifier": "Apache-2.0",
-  "primaryScene": "visible",
-  "trayScene": "tray",
-  "activeScene": "active",
-  "runs": [
-    {
-      "os": "windows",
-      "host": "windows-fixture",
-      "scene": "visible",
-      "kind": "comparison",
-      "pair": "a",
-      "arm": "matched-electron",
-      "order": 1,
-      "file": "windows-baseline.txt",
-      "windowMs": [
-        0,
-        2000
-      ],
-      "requiredGuiRoles": [
-        "renderer"
-      ],
-      "fence": {
-        "before": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
+    "SPDX-FileCopyrightText": "Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+    "SPDX-License-Identifier": "Apache-2.0",
+    "primaryScene": "visible",
+    "trayScene": "tray",
+    "activeScene": "active",
+    "runs": [
+        {
+            "os": "windows",
+            "host": "windows-fixture",
+            "scene": "visible",
+            "kind": "comparison",
+            "pair": "a",
+            "arm": "matched-electron",
+            "order": 1,
+            "file": "windows-baseline.txt",
+            "windowMs": [0, 2000],
+            "requiredGuiRoles": ["renderer"],
+            "fence": {
+                "before": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                },
+                "after": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                }
+            },
+            "parity": true,
+            "usableCurrentData": true,
+            "attributionClear": true,
+            "activeUse": false,
+            "measurements": {
+                "warmReopenMs": [500, 520, 580],
+                "coldOpenMs": [1200],
+                "missedFramesPercent": [2, 4, 6],
+                "completionPercent": [100],
+                "inferenceTimings": [
+                    {
+                        "requestId": "windows-1-sample",
+                        "attempt": 1,
+                        "firstTokenMs": 110,
+                        "tokensPerSecond": 21
+                    }
+                ],
+                "inferenceRequests": [
+                    {
+                        "requestId": "windows-1-sample",
+                        "attempt": 1,
+                        "success": true,
+                        "singleAttempt": true,
+                        "localModel": {
+                            "pid": 31,
+                            "createdUtc": "2026-11-20T00:00:00.000Z"
+                        }
+                    }
+                ]
+            },
+            "inputMode": "replay",
+            "intervalMs": 1000
         },
-        "after": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
-        }
-      },
-      "parity": true,
-      "usableCurrentData": true,
-      "attributionClear": true,
-      "activeUse": false,
-      "measurements": {
-        "warmReopenMs": [
-          500,
-          520,
-          580
-        ],
-        "coldOpenMs": [
-          1200
-        ],
-        "missedFramesPercent": [
-          2,
-          4,
-          6
-        ],
-        "completionPercent": [
-          100
-        ],
-        "inferenceTimings": [
-          {
-            "requestId": "windows-1-sample",
-            "attempt": 1,
-            "firstTokenMs": 110,
-            "tokensPerSecond": 21
-          }
-        ],
-        "inferenceRequests": [
-          {
-            "requestId": "windows-1-sample",
-            "attempt": 1,
-            "success": true,
-            "singleAttempt": true,
-            "localModel": {
-              "pid": 31,
-              "createdUtc": "2026-11-20T00:00:00.000Z"
-            }
-          }
-        ]
-      },
-      "inputMode": "replay",
-      "intervalMs": 1000
-    },
-    {
-      "os": "windows",
-      "host": "windows-fixture",
-      "scene": "visible",
-      "kind": "comparison",
-      "pair": "a",
-      "arm": "wails",
-      "order": 2,
-      "file": "windows-candidate.txt",
-      "windowMs": [
-        0,
-        2000
-      ],
-      "requiredGuiRoles": [
-        "renderer"
-      ],
-      "fence": {
-        "before": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
+        {
+            "os": "windows",
+            "host": "windows-fixture",
+            "scene": "visible",
+            "kind": "comparison",
+            "pair": "a",
+            "arm": "wails",
+            "order": 2,
+            "file": "windows-candidate.txt",
+            "windowMs": [0, 2000],
+            "requiredGuiRoles": ["renderer"],
+            "fence": {
+                "before": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                },
+                "after": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                }
+            },
+            "parity": true,
+            "usableCurrentData": true,
+            "attributionClear": true,
+            "activeUse": false,
+            "measurements": {
+                "warmReopenMs": [500, 520, 580],
+                "coldOpenMs": [1200],
+                "missedFramesPercent": [2, 4, 6],
+                "completionPercent": [100],
+                "inferenceTimings": [
+                    {
+                        "requestId": "windows-2-sample",
+                        "attempt": 1,
+                        "firstTokenMs": 110,
+                        "tokensPerSecond": 21
+                    }
+                ],
+                "inferenceRequests": [
+                    {
+                        "requestId": "windows-2-sample",
+                        "attempt": 1,
+                        "success": true,
+                        "singleAttempt": true,
+                        "localModel": {
+                            "pid": 31,
+                            "createdUtc": "2026-11-20T00:00:00.000Z"
+                        }
+                    }
+                ]
+            },
+            "inputMode": "replay",
+            "intervalMs": 1000
         },
-        "after": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
-        }
-      },
-      "parity": true,
-      "usableCurrentData": true,
-      "attributionClear": true,
-      "activeUse": false,
-      "measurements": {
-        "warmReopenMs": [
-          500,
-          520,
-          580
-        ],
-        "coldOpenMs": [
-          1200
-        ],
-        "missedFramesPercent": [
-          2,
-          4,
-          6
-        ],
-        "completionPercent": [
-          100
-        ],
-        "inferenceTimings": [
-          {
-            "requestId": "windows-2-sample",
-            "attempt": 1,
-            "firstTokenMs": 110,
-            "tokensPerSecond": 21
-          }
-        ],
-        "inferenceRequests": [
-          {
-            "requestId": "windows-2-sample",
-            "attempt": 1,
-            "success": true,
-            "singleAttempt": true,
-            "localModel": {
-              "pid": 31,
-              "createdUtc": "2026-11-20T00:00:00.000Z"
-            }
-          }
-        ]
-      },
-      "inputMode": "replay",
-      "intervalMs": 1000
-    },
-    {
-      "os": "macos",
-      "host": "macos-fixture",
-      "scene": "visible",
-      "kind": "comparison",
-      "pair": "a",
-      "arm": "matched-electron",
-      "order": 1,
-      "file": "macos-baseline.txt",
-      "windowMs": [
-        0,
-        2000
-      ],
-      "requiredGuiRoles": [
-        "renderer"
-      ],
-      "fence": {
-        "before": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
+        {
+            "os": "macos",
+            "host": "macos-fixture",
+            "scene": "visible",
+            "kind": "comparison",
+            "pair": "a",
+            "arm": "matched-electron",
+            "order": 1,
+            "file": "macos-baseline.txt",
+            "windowMs": [0, 2000],
+            "requiredGuiRoles": ["renderer"],
+            "fence": {
+                "before": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                },
+                "after": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                }
+            },
+            "parity": true,
+            "usableCurrentData": true,
+            "attributionClear": true,
+            "activeUse": false,
+            "measurements": {
+                "warmReopenMs": [500, 520, 580],
+                "coldOpenMs": [1200],
+                "missedFramesPercent": [2, 4, 6],
+                "completionPercent": [100],
+                "inferenceTimings": [
+                    {
+                        "requestId": "macos-1-sample",
+                        "attempt": 1,
+                        "firstTokenMs": 110,
+                        "tokensPerSecond": 21
+                    }
+                ],
+                "inferenceRequests": [
+                    {
+                        "requestId": "macos-1-sample",
+                        "attempt": 1,
+                        "success": true,
+                        "singleAttempt": true,
+                        "localModel": {
+                            "pid": 31,
+                            "createdUtc": "2026-11-20T00:00:00.000Z"
+                        }
+                    }
+                ]
+            },
+            "inputMode": "replay",
+            "intervalMs": 1000
         },
-        "after": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
+        {
+            "os": "macos",
+            "host": "macos-fixture",
+            "scene": "visible",
+            "kind": "comparison",
+            "pair": "a",
+            "arm": "wails",
+            "order": 2,
+            "file": "macos-candidate.txt",
+            "windowMs": [0, 2000],
+            "requiredGuiRoles": ["renderer"],
+            "fence": {
+                "before": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                },
+                "after": {
+                    "service": {
+                        "pid": 10,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "broker": {
+                        "pid": 11,
+                        "createdUtc": "2026-11-20T00:00:00.000Z"
+                    },
+                    "serviceBuild": "sample-service",
+                    "brokerBuild": "sample-broker",
+                    "brokerRestartCount": 0,
+                    "modelSettings": "sample-settings"
+                }
+            },
+            "parity": true,
+            "usableCurrentData": true,
+            "attributionClear": true,
+            "activeUse": false,
+            "measurements": {
+                "warmReopenMs": [500, 520, 580],
+                "coldOpenMs": [1200],
+                "missedFramesPercent": [2, 4, 6],
+                "completionPercent": [100],
+                "inferenceTimings": [
+                    {
+                        "requestId": "macos-2-sample",
+                        "attempt": 1,
+                        "firstTokenMs": 110,
+                        "tokensPerSecond": 21
+                    }
+                ],
+                "inferenceRequests": [
+                    {
+                        "requestId": "macos-2-sample",
+                        "attempt": 1,
+                        "success": true,
+                        "singleAttempt": true,
+                        "localModel": {
+                            "pid": 31,
+                            "createdUtc": "2026-11-20T00:00:00.000Z"
+                        }
+                    }
+                ]
+            },
+            "inputMode": "replay",
+            "intervalMs": 1000
         }
-      },
-      "parity": true,
-      "usableCurrentData": true,
-      "attributionClear": true,
-      "activeUse": false,
-      "measurements": {
-        "warmReopenMs": [
-          500,
-          520,
-          580
-        ],
-        "coldOpenMs": [
-          1200
-        ],
-        "missedFramesPercent": [
-          2,
-          4,
-          6
-        ],
-        "completionPercent": [
-          100
-        ],
-        "inferenceTimings": [
-          {
-            "requestId": "macos-1-sample",
-            "attempt": 1,
-            "firstTokenMs": 110,
-            "tokensPerSecond": 21
-          }
-        ],
-        "inferenceRequests": [
-          {
-            "requestId": "macos-1-sample",
-            "attempt": 1,
-            "success": true,
-            "singleAttempt": true,
-            "localModel": {
-              "pid": 31,
-              "createdUtc": "2026-11-20T00:00:00.000Z"
-            }
-          }
-        ]
-      },
-      "inputMode": "replay",
-      "intervalMs": 1000
-    },
-    {
-      "os": "macos",
-      "host": "macos-fixture",
-      "scene": "visible",
-      "kind": "comparison",
-      "pair": "a",
-      "arm": "wails",
-      "order": 2,
-      "file": "macos-candidate.txt",
-      "windowMs": [
-        0,
-        2000
-      ],
-      "requiredGuiRoles": [
-        "renderer"
-      ],
-      "fence": {
-        "before": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
-        },
-        "after": {
-          "service": {
-            "pid": 10,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "broker": {
-            "pid": 11,
-            "createdUtc": "2026-11-20T00:00:00.000Z"
-          },
-          "serviceBuild": "sample-service",
-          "brokerBuild": "sample-broker",
-          "brokerRestartCount": 0,
-          "modelSettings": "sample-settings"
-        }
-      },
-      "parity": true,
-      "usableCurrentData": true,
-      "attributionClear": true,
-      "activeUse": false,
-      "measurements": {
-        "warmReopenMs": [
-          500,
-          520,
-          580
-        ],
-        "coldOpenMs": [
-          1200
-        ],
-        "missedFramesPercent": [
-          2,
-          4,
-          6
-        ],
-        "completionPercent": [
-          100
-        ],
-        "inferenceTimings": [
-          {
-            "requestId": "macos-2-sample",
-            "attempt": 1,
-            "firstTokenMs": 110,
-            "tokensPerSecond": 21
-          }
-        ],
-        "inferenceRequests": [
-          {
-            "requestId": "macos-2-sample",
-            "attempt": 1,
-            "success": true,
-            "singleAttempt": true,
-            "localModel": {
-              "pid": 31,
-              "createdUtc": "2026-11-20T00:00:00.000Z"
-            }
-          }
-        ]
-      },
-      "inputMode": "replay",
-      "intervalMs": 1000
-    }
-  ]
+    ]
 }
