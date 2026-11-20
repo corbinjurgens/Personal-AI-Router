@@ -4,6 +4,7 @@
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
+import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
 const serviceNames = /^nvpair-(service|ui-broker|cluster-manager|engine-manager|errors|job-scheduler|manual-nodes|node-info|node-scanner|node-settings|proxy|workload-manager)$/
@@ -14,6 +15,15 @@ function command(file, ...args) {
 }
 
 const key = row => `${row.pid}/${row.createdUtc}`
+
+export function cpuDeltas(previous, current, elapsedMs) {
+  const prior = new Map(previous.map(row => [key(row), row.cpuSeconds]))
+  return current.map(row => {
+    const last = prior.get(key(row))
+    return elapsedMs > 0 && last !== undefined && row.cpuSeconds >= last
+      ? (row.cpuSeconds - last) * 1e6 / elapsedMs : null
+  })
+}
 
 function snapshot() {
   const output = command('/bin/ps', '-axww', '-o', 'pid=,ppid=,lstart=,time=,comm=')
@@ -77,13 +87,13 @@ function systemCounters() {
   }
 }
 
-async function sample() {
-  const options = Object.fromEntries(['gui-path', 'gui-name', 'gui-pid'].map(name =>
+export function parseSelectors(args) {
+  const options = Object.fromEntries(['gui-path', 'gui-name', 'gui-pid', 'helper'].map(name =>
     [name, { type: 'string', multiple: true, default: [] }]))
-  for (const name of ['helper', 'renderer', 'gpu', 'service', 'model', 'interval', 'duration']) {
+  for (const name of ['helper-pattern', 'renderer', 'gpu', 'service', 'model', 'interval', 'duration']) {
     options[name] = { type: 'string' }
   }
-  const { values } = parseArgs({ options })
+  const { values } = parseArgs({ args, options })
   const paths = new Set(values['gui-path'])
   const names = new Set(values['gui-name'])
   const pids = new Set(values['gui-pid'].map(Number))
@@ -91,15 +101,68 @@ async function sample() {
   const duration = Number(values.duration ?? 300) * 1000
   if (![interval, duration].every(value => Number.isFinite(value) && value >= 1) ||
       [...pids].some(pid => !Number.isSafeInteger(pid) || pid <= 0)) throw new Error('invalid sampler arguments')
+  const helpers = new Map()
+  const helperPids = new Set()
+  for (const selector of values.helper) {
+    const match = selector.match(/^(\d+):(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.000)?Z):(renderer|gpu|other)$/)
+    const pid = Number(match?.[1])
+    const startMs = Date.parse(match?.[2])
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(startMs)) throw new Error('invalid helper selector')
+    const createdUtc = new Date(startMs).toISOString()
+    if (createdUtc !== match[2].replace(/(?<!\.000)Z$/, '.000Z')) throw new Error('invalid helper selector')
+    const id = key({ pid, createdUtc })
+    if (helpers.has(id) && helpers.get(id) !== match[3]) throw new Error('conflicting helper roles')
+    helpers.set(id, match[3])
+    helperPids.add(pid)
+  }
   const pattern = name => values[name] ? new RegExp(values[name], 'i') : /(?!)/
-  const helper = pattern('helper')
+  const helperPattern = values['helper-pattern'] ? pattern('helper-pattern') : null
   const renderer = pattern('renderer')
   const gpu = pattern('gpu')
   const service = values.service ? pattern('service') : serviceNames
   const model = pattern('model')
   const guiRole = row => gpu.test(row.image) ? 'gpu' : renderer.test(row.image) ? 'renderer' : 'other'
-  const seeds = new Set()
-  let previous = new Map()
+  return { paths, names, pids, helpers, helperPids, interval, duration, helperPattern, service, model, guiRole }
+}
+
+export function selectProcesses(rows, options, known = new Map(), mainSeeds) {
+  const { paths, names, pids, helpers, helperPids, helperPattern, service, model, guiRole } = options
+  mainSeeds ??= new Set([...rows.values()].filter(row => pids.has(row.pid)).map(key))
+  const selected = new Map()
+  for (const row of rows.values()) {
+    const id = key(row)
+    if (helpers.has(id)) selected.set(row.pid, { group: 'gui', role: helpers.get(id) })
+    else if (model.test(row.image)) selected.set(row.pid, { group: 'model', role: 'engine' })
+    else if (service.test(row.name)) {
+      const role = row.name === 'nvpair-service' ? 'service' : row.name === 'nvpair-ui-broker' ? 'broker' : 'worker'
+      selected.set(row.pid, { group: 'service', role })
+    } else if (!helperPids.has(row.pid) && (paths.has(row.image) || names.has(row.name) || mainSeeds.has(id))) {
+      selected.set(row.pid, { group: 'gui', role: 'main' })
+    } else if (known.has(id)) selected.set(row.pid, known.get(id))
+  }
+  const classify = (row, parent) => parent.group === 'gui'
+    ? { group: 'gui', role: guiRole(row), ambiguous: parent.ambiguous }
+    : { group: parent.group, role: parent.group === 'service' ? 'worker' : 'engine' }
+  descendants(rows, selected, classify)
+  if (helperPattern) {
+    // Ancestry and explicit selectors establish ownership before regex discovery.
+    for (const row of rows.values()) {
+      if (!selected.has(row.pid) && helperPattern.test(row.image)) {
+        selected.set(row.pid, { group: 'gui', role: guiRole(row), ambiguous: true })
+      }
+    }
+    descendants(rows, selected, classify)
+  }
+  const current = new Map([...selected].map(([pid, attribution]) => [key(rows.get(pid)), attribution]))
+  return { selected, known: current, mainSeeds,
+    attributionClear: [...selected.values()].every(attribution => !attribution.ambiguous) }
+}
+
+async function sample() {
+  const options = parseSelectors(process.argv.slice(2))
+  const { interval, duration } = options
+  let mainSeeds
+  let previous = []
   let known = new Map()
   let previousMs = 0
   const started = performance.now()
@@ -113,41 +176,25 @@ async function sample() {
     const excluded = new Map([[process.pid, true]])
     descendants(rows, excluded, () => true)
     for (const pid of excluded.keys()) rows.delete(pid)
-    const selected = new Map()
-    for (const row of rows.values()) {
-      const id = key(row)
-      if (next === 0 && pids.has(row.pid)) seeds.add(id)
-      if (model.test(row.image)) selected.set(row.pid, { group: 'model', role: 'engine' })
-      else if (service.test(row.name)) {
-        const role = row.name === 'nvpair-service' ? 'service' : row.name === 'nvpair-ui-broker' ? 'broker' : 'worker'
-        selected.set(row.pid, { group: 'service', role })
-      } else if (paths.has(row.image) || names.has(row.name) || seeds.has(id)) {
-        selected.set(row.pid, { group: 'gui', role: 'main' })
-      } else if (helper.test(row.image)) selected.set(row.pid, { group: 'gui', role: guiRole(row) })
-      else if (known.has(id)) selected.set(row.pid, known.get(id))
-    }
-    descendants(rows, selected, (row, parent) => parent.group === 'gui' ? { group: 'gui', role: guiRole(row) }
-      : { group: parent.group, role: parent.group === 'service' ? 'worker' : 'engine' })
+    const selection = selectProcesses(rows, options, known, mainSeeds)
+    const { selected, attributionClear } = selection
+    mainSeeds = selection.mainSeeds
+    known = selection.known
     const memory = footprint([...selected.keys()])
     const after = snapshot()
-    const processes = []
-    const current = new Map()
-    known = new Map()
-    for (const [pid, attribution] of selected) {
-      const row = rows.get(pid)
-      const id = key(row)
-      const last = previous.get(id)
-      const cpuMsPerSec = last !== undefined && row.cpuSeconds >= last
-        ? (row.cpuSeconds - last) * 1e6 / (elapsedMs - previousMs) : null
-      const stillPresent = after.has(pid) && key(after.get(pid)) === id
-      processes.push({ pid, createdUtc: row.createdUtc, ...attribution,
+    const current = [...selected.keys()].map(pid => rows.get(pid))
+    const cpu = cpuDeltas(previous, current, elapsedMs - previousMs)
+    const processes = current.map((row, index) => {
+      const { pid, createdUtc } = row
+      const { group, role } = selected.get(pid)
+      const stillPresent = after.has(pid) && key(after.get(pid)) === key(row)
+      return { pid, createdUtc, group, role,
         memoryBytes: stillPresent ? memory.get(pid) ?? null : null,
-        cpuMsPerSec, cpuPercentOneCore: null, commitBytes: null,
-        gpuEnginePercent: null, gpuDedicatedBytes: null, gpuSharedBytes: null })
-      current.set(id, row.cpuSeconds)
-      known.set(id, attribution)
-    }
-    console.log(JSON.stringify({ schema: 1, os: 'macos', elapsedMs, timestamp, processes, system: systemCounters() }))
+        cpuMsPerSec: cpu[index], cpuPercentOneCore: null, commitBytes: null,
+        gpuEnginePercent: null, gpuDedicatedBytes: null, gpuSharedBytes: null }
+    })
+    console.log(JSON.stringify({ schema: 1, os: 'macos', elapsedMs, timestamp, attributionClear, processes,
+      system: systemCounters() }))
     previousMs = elapsedMs
     previous = current
     next += interval
@@ -155,9 +202,11 @@ async function sample() {
   }
 }
 
-try {
-  await sample()
-} catch (error) {
-  console.error(error.message)
-  process.exitCode = 1
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await sample()
+  } catch (error) {
+    console.error(error.message)
+    process.exitCode = 1
+  }
 }

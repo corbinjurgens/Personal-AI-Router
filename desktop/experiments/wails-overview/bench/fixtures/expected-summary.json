@@ -3,6 +3,7 @@
   "SPDX-License-Identifier": "Apache-2.0",
   "windows": {
     "verdict": "material-win",
+    "winCriteria": [{ "metric": "visibleMemoryMiB" }],
     "visibleMemory": {
       "verdict": "material-win",
       "threshold": 100,
@@ -14,6 +15,7 @@
   },
   "macos": {
     "verdict": "no-material-win",
+    "winCriteria": [],
     "visibleMemory": {
       "verdict": "no-material-win",
       "threshold": 100,

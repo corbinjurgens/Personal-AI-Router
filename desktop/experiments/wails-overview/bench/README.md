@@ -52,14 +52,25 @@ node "$bench/compare.mjs" --validate-samples "$evidence/visible-01.jsonl"
 ```
 
 Repeat `--gui-name` for exact basenames or `--gui-path` for exact executable paths.
+Use `--gui-pid` for a main process observed at sampler startup. On macOS, pass
+each independently verified detached helper as
+`--helper '12345:2026-11-20T14:03:01Z:renderer'`. The fields are the PID, the
+UTC start time from `TZ=UTC LC_ALL=C ps -p PID -o lstart=` converted to ISO 8601
+at whole-second precision, and the role (`renderer`, `gpu` or `other`). Retain
+the ownership evidence. If a launchd-parented helper restarts, identify its
+replacement before making another decisive capture. The sampler only matches
+the declared incarnation. `--helper-pattern` can inspect detached regex
+matches during discovery. Any helper admitted by that pattern without other
+ownership evidence marks the sample `attributionClear: false`, which invalidates
+the steady run.
+
 The macOS helper, renderer, GPU and model expressions match the `ps` executable
-name/path field. Include detached WebKit helpers only when their ownership can
-be verified. On either OS, selectors seed groups and the collector follows their
-descendants. Use `-ServicePattern` or `--service` to adjust the service image-name
-selector. For service-only controls, omit the GUI selectors. The model selector
-takes precedence when a model engine belongs to the service process tree.
-Role expressions classify selected helpers and leave the remainder in
-`gui/other`. Use distinct main and detached helper selectors.
+name/path field. On either OS, selectors seed groups and the collector follows
+their descendants. Use `-ServicePattern` or `--service` to adjust the service
+image-name selector. For service-only controls, omit the GUI selectors. The
+model selector takes precedence when a model engine belongs to the service
+process tree. Role expressions classify selected helpers and leave the
+remainder in `gui/other`.
 
 The samplers only observe. They omit paths, command lines, request payloads,
 machine names and model names from output. A missed timer slot stays missing;
@@ -96,7 +107,11 @@ reverse a result, set `attributionClear` to false.
 ## Analyze
 
 Use [the synthetic manifest](fixtures/manifest.json) as the schema example.
-Use distinct files for real captures. Record before and after fences for each
+It contains one pair per OS and produces an inconclusive verdict. The tests
+generate a complete synthetic matrix with independent capture timestamps.
+Use a separate raw file for each run. The analyzer rejects every occurrence
+of a repeated capture SHA-256, including copies under different names.
+Record before and after fences for each
 run using the observed service and broker PID and creation time, redacted
 executable/build identities (for example executable hashes), observed broker
 restart count and a redacted fingerprint of the effective model settings.
@@ -106,24 +121,44 @@ and the evidence for settings, output parity and usable current data.
 Declare `primaryScene`, `trayScene` and `activeScene`. Each run names its
 platform, redacted `host`, `scene`, `arm`, `pair`, increasing
 capture `order` on that machine, raw `file` relative to the manifest,
-inclusive `windowMs`, and `requiredGuiRoles`. Use
+inclusive `windowMs`, `intervalMs`, `inputMode` and `requiredGuiRoles`. Set
+`inputMode` to `replay` for a fixed GUI input stream and `live` for live GUI
+input. A pair needs the same mode and sampling interval in both runs. Use a
+separate manifest per mode to obtain separate verdicts.
+
+The sampling schedule starts at elapsed zero. Every scheduled slot inside
+`windowMs` needs exactly one sample within 10% of `intervalMs` of its scheduled
+time. The window must contain at least two slots. Collect padding before and
+after the window so boundary slots can tolerate timer jitter.
+
+Use
 `kind: "comparison"` for matched Electron versus Wails,
 `kind: "control"` for a same-arm noise pair and
 `kind: "stock-reference"` for stock versus matched Electron. Pair names are
 local to the machine, scene and kind. Set `requiredGroup: "service"` for
-service-only idle or `"model"` when a model engine must be present. In the
-default GUI mode every steady sample must include a main process and any
-declared helper roles. Declare whether parity, attribution, usable current
-data and active-use conditions were actually observed. For inference samples,
-verify the chosen route, model and one successful attempt before including
-latency and throughput. Record per-observation measurements as numeric arrays
-and include completion percentages; a failed or unverified completion
-invalidates a run with inference timings.
+service-only idle or `"model"` when a model engine must be present in a
+separate scene. Every primary and active-use steady sample requires GUI main,
+a local model engine and all declared GUI roles together. The default group
+outside those scenes requires GUI main and the declared roles. Declare whether
+parity, attribution, usable current data and active-use conditions were
+actually observed.
+
+Use redacted request IDs. Record a `measurements.inferenceTimings` entry with
+`requestId`, positive integer `attempt` and at least one of `firstTokenMs`
+and `tokensPerSecond`. Record its corroborating
+`measurements.inferenceRequests` entry with the same ID and attempt,
+`success: true`, `singleAttempt: true`, and the sampled local model
+`localModel: { pid, createdUtc }`. Retain the redacted route, model, node and
+terminal completion evidence and the evidence for a single attempt. The
+analyzer excludes and counts unkeyed, unmatched, failed, ambiguous and
+non-local timings. A declared failed request or a completion percentage below
+100 invalidates the run. Keep the other per-observation measurements as
+numeric arrays.
 
 ```bash
 node "$bench/compare.mjs" "$evidence/manifest.json" \
   > "$evidence/summary.json" 2> "$evidence/summary.md"
-node --test "$bench/compare.test.mjs"
+node --test "$bench/"
 ```
 
 The analyzer rejects malformed counter rows, missing required helpers,
@@ -137,13 +172,26 @@ deltas are positive when the candidate improves. Relative inference deltas
 use that pair's baseline as the denominator.
 
 Noise is the maximum absolute delta among valid, interleaved same-arm controls
-from the same scene, machine and fence. A visible memory win requires every
-valid pair to favor Wails and a median benefit above both 100 MiB and observed
-noise. Guardrail tolerances are 5 percentage points for missed frames, 5% for
+from the same scene, machine, fence, input mode and sampling interval. Each
+comparison arm needs its own matching controls with measurements for the
+metric.
+
+A visible memory win requires every valid pair to favor Wails and a median
+benefit above both 100 MiB and observed noise. The alternative requires every
+valid primary pair to favor Wails for the same GUI demand metric (CPU ms/s or
+GPU engine utilization) and the same outcome. Both median improvements must
+exceed their observed noise. The outcome also needs at least 5% higher
+tokens/s, 10% lower first-token latency, or 5 percentage points fewer missed
+presentations. For decisive CPU demand, every steady slot after the first
+needs complete counters for the selected GUI group. GPU demand needs complete
+steady-window utilization counters. The report lists the criteria that
+passed in `winCriteria`.
+
+Guardrail tolerances are 5 percentage points for missed frames, 5% for
 throughput, 10% for first-token latency, 250 ms for warm reopen, and 50 MiB for
-tray memory. The overall OS verdict also requires sufficient visible and tray
-pairs and decisive guardrail and active-use results. Treat a Windows-only
-result as pending macOS confirmation.
+tray memory. The overall OS verdict requires at least three valid visible
+and tray comparisons, plus decisive guardrail and active-use results. Treat
+a Windows-only result as pending macOS confirmation.
 Review the stock reference separately when attributing gains to a narrower
 workload. Keep cold open, completion, attribution, native trace and installer
 size evidence with the output.

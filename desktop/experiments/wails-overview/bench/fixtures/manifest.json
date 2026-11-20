@@ -5,59 +5,369 @@
   "trayScene": "tray",
   "activeScene": "active",
   "runs": [
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"a","arm":"matched-electron","order":1,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"a","arm":"wails","order":2,"file":"windows-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"control","pair":"noise","arm":"matched-electron","order":3,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"control","pair":"noise","arm":"matched-electron","order":4,"file":"windows-control.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"b","arm":"wails","order":5,"file":"windows-candidate-two.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"b","arm":"matched-electron","order":6,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"c","arm":"matched-electron","order":7,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"c","arm":"wails","order":8,"file":"windows-candidate-three.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"comparison","pair":"a","arm":"matched-electron","order":9,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"comparison","pair":"a","arm":"wails","order":10,"file":"windows-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"control","pair":"noise","arm":"matched-electron","order":11,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"control","pair":"noise","arm":"matched-electron","order":12,"file":"windows-control.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"comparison","pair":"b","arm":"wails","order":13,"file":"windows-candidate-two.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"comparison","pair":"b","arm":"matched-electron","order":14,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"comparison","pair":"c","arm":"matched-electron","order":15,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"tray","kind":"comparison","pair":"c","arm":"wails","order":16,"file":"windows-candidate-three.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"comparison","pair":"a","arm":"matched-electron","order":17,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"comparison","pair":"a","arm":"wails","order":18,"file":"windows-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"control","pair":"noise","arm":"matched-electron","order":19,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"control","pair":"noise","arm":"matched-electron","order":20,"file":"windows-control.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"comparison","pair":"b","arm":"wails","order":21,"file":"windows-candidate-two.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"comparison","pair":"b","arm":"matched-electron","order":22,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"comparison","pair":"c","arm":"matched-electron","order":23,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"active","kind":"comparison","pair":"c","arm":"wails","order":24,"file":"windows-candidate-three.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"missing","arm":"matched-electron","order":25,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"missing","arm":"wails","order":26,"file":"windows-missing.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"invalid","arm":"matched-electron","order":27,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"invalid","arm":"wails","order":28,"file":"windows-invalid.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"restart","arm":"matched-electron","order":29,"file":"windows-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"windows","host":"windows-fixture","scene":"visible","kind":"comparison","pair":"restart","arm":"wails","order":30,"file":"windows-restart.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:01.500Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":1,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:01.500Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":1,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"comparison","pair":"a","arm":"matched-electron","order":1,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"comparison","pair":"a","arm":"wails","order":2,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"control","pair":"noise","arm":"matched-electron","order":3,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"control","pair":"noise","arm":"matched-electron","order":4,"file":"macos-control.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"comparison","pair":"b","arm":"wails","order":5,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"comparison","pair":"b","arm":"matched-electron","order":6,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"comparison","pair":"c","arm":"matched-electron","order":7,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"visible","kind":"comparison","pair":"c","arm":"wails","order":8,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"comparison","pair":"a","arm":"matched-electron","order":9,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"comparison","pair":"a","arm":"wails","order":10,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"control","pair":"noise","arm":"matched-electron","order":11,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"control","pair":"noise","arm":"matched-electron","order":12,"file":"macos-control.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"comparison","pair":"b","arm":"wails","order":13,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"comparison","pair":"b","arm":"matched-electron","order":14,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"comparison","pair":"c","arm":"matched-electron","order":15,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"tray","kind":"comparison","pair":"c","arm":"wails","order":16,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":false,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"comparison","pair":"a","arm":"matched-electron","order":17,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"comparison","pair":"a","arm":"wails","order":18,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"control","pair":"noise","arm":"matched-electron","order":19,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"control","pair":"noise","arm":"matched-electron","order":20,"file":"macos-control.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"comparison","pair":"b","arm":"wails","order":21,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"comparison","pair":"b","arm":"matched-electron","order":22,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"comparison","pair":"c","arm":"matched-electron","order":23,"file":"macos-baseline.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}},
-    {"os":"macos","host":"macos-fixture","scene":"active","kind":"comparison","pair":"c","arm":"wails","order":24,"file":"macos-candidate.txt","windowMs":[0,2000],"requiredGuiRoles":["renderer"],"fence":{"before":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"},"after":{"service":{"pid":10,"createdUtc":"2026-11-20T00:00:00.000Z"},"broker":{"pid":11,"createdUtc":"2026-11-20T00:00:00.000Z"},"serviceBuild":"sample-service","brokerBuild":"sample-broker","brokerRestartCount":0,"modelSettings":"sample-settings"}},"parity":true,"usableCurrentData":true,"attributionClear":true,"activeUse":true,"measurements":{"warmReopenMs":[500,520,580],"coldOpenMs":[1200],"missedFramesPercent":[2,4,6],"firstTokenMs":[100,110,120],"tokensPerSecond":[20,21,22],"completionPercent":[100,100,100]}}
+    {
+      "os": "windows",
+      "host": "windows-fixture",
+      "scene": "visible",
+      "kind": "comparison",
+      "pair": "a",
+      "arm": "matched-electron",
+      "order": 1,
+      "file": "windows-baseline.txt",
+      "windowMs": [
+        0,
+        2000
+      ],
+      "requiredGuiRoles": [
+        "renderer"
+      ],
+      "fence": {
+        "before": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        },
+        "after": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        }
+      },
+      "parity": true,
+      "usableCurrentData": true,
+      "attributionClear": true,
+      "activeUse": false,
+      "measurements": {
+        "warmReopenMs": [
+          500,
+          520,
+          580
+        ],
+        "coldOpenMs": [
+          1200
+        ],
+        "missedFramesPercent": [
+          2,
+          4,
+          6
+        ],
+        "completionPercent": [
+          100
+        ],
+        "inferenceTimings": [
+          {
+            "requestId": "windows-1-sample",
+            "attempt": 1,
+            "firstTokenMs": 110,
+            "tokensPerSecond": 21
+          }
+        ],
+        "inferenceRequests": [
+          {
+            "requestId": "windows-1-sample",
+            "attempt": 1,
+            "success": true,
+            "singleAttempt": true,
+            "localModel": {
+              "pid": 31,
+              "createdUtc": "2026-11-20T00:00:00.000Z"
+            }
+          }
+        ]
+      },
+      "inputMode": "replay",
+      "intervalMs": 1000
+    },
+    {
+      "os": "windows",
+      "host": "windows-fixture",
+      "scene": "visible",
+      "kind": "comparison",
+      "pair": "a",
+      "arm": "wails",
+      "order": 2,
+      "file": "windows-candidate.txt",
+      "windowMs": [
+        0,
+        2000
+      ],
+      "requiredGuiRoles": [
+        "renderer"
+      ],
+      "fence": {
+        "before": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        },
+        "after": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        }
+      },
+      "parity": true,
+      "usableCurrentData": true,
+      "attributionClear": true,
+      "activeUse": false,
+      "measurements": {
+        "warmReopenMs": [
+          500,
+          520,
+          580
+        ],
+        "coldOpenMs": [
+          1200
+        ],
+        "missedFramesPercent": [
+          2,
+          4,
+          6
+        ],
+        "completionPercent": [
+          100
+        ],
+        "inferenceTimings": [
+          {
+            "requestId": "windows-2-sample",
+            "attempt": 1,
+            "firstTokenMs": 110,
+            "tokensPerSecond": 21
+          }
+        ],
+        "inferenceRequests": [
+          {
+            "requestId": "windows-2-sample",
+            "attempt": 1,
+            "success": true,
+            "singleAttempt": true,
+            "localModel": {
+              "pid": 31,
+              "createdUtc": "2026-11-20T00:00:00.000Z"
+            }
+          }
+        ]
+      },
+      "inputMode": "replay",
+      "intervalMs": 1000
+    },
+    {
+      "os": "macos",
+      "host": "macos-fixture",
+      "scene": "visible",
+      "kind": "comparison",
+      "pair": "a",
+      "arm": "matched-electron",
+      "order": 1,
+      "file": "macos-baseline.txt",
+      "windowMs": [
+        0,
+        2000
+      ],
+      "requiredGuiRoles": [
+        "renderer"
+      ],
+      "fence": {
+        "before": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        },
+        "after": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        }
+      },
+      "parity": true,
+      "usableCurrentData": true,
+      "attributionClear": true,
+      "activeUse": false,
+      "measurements": {
+        "warmReopenMs": [
+          500,
+          520,
+          580
+        ],
+        "coldOpenMs": [
+          1200
+        ],
+        "missedFramesPercent": [
+          2,
+          4,
+          6
+        ],
+        "completionPercent": [
+          100
+        ],
+        "inferenceTimings": [
+          {
+            "requestId": "macos-1-sample",
+            "attempt": 1,
+            "firstTokenMs": 110,
+            "tokensPerSecond": 21
+          }
+        ],
+        "inferenceRequests": [
+          {
+            "requestId": "macos-1-sample",
+            "attempt": 1,
+            "success": true,
+            "singleAttempt": true,
+            "localModel": {
+              "pid": 31,
+              "createdUtc": "2026-11-20T00:00:00.000Z"
+            }
+          }
+        ]
+      },
+      "inputMode": "replay",
+      "intervalMs": 1000
+    },
+    {
+      "os": "macos",
+      "host": "macos-fixture",
+      "scene": "visible",
+      "kind": "comparison",
+      "pair": "a",
+      "arm": "wails",
+      "order": 2,
+      "file": "macos-candidate.txt",
+      "windowMs": [
+        0,
+        2000
+      ],
+      "requiredGuiRoles": [
+        "renderer"
+      ],
+      "fence": {
+        "before": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        },
+        "after": {
+          "service": {
+            "pid": 10,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "broker": {
+            "pid": 11,
+            "createdUtc": "2026-11-20T00:00:00.000Z"
+          },
+          "serviceBuild": "sample-service",
+          "brokerBuild": "sample-broker",
+          "brokerRestartCount": 0,
+          "modelSettings": "sample-settings"
+        }
+      },
+      "parity": true,
+      "usableCurrentData": true,
+      "attributionClear": true,
+      "activeUse": false,
+      "measurements": {
+        "warmReopenMs": [
+          500,
+          520,
+          580
+        ],
+        "coldOpenMs": [
+          1200
+        ],
+        "missedFramesPercent": [
+          2,
+          4,
+          6
+        ],
+        "completionPercent": [
+          100
+        ],
+        "inferenceTimings": [
+          {
+            "requestId": "macos-2-sample",
+            "attempt": 1,
+            "firstTokenMs": 110,
+            "tokensPerSecond": 21
+          }
+        ],
+        "inferenceRequests": [
+          {
+            "requestId": "macos-2-sample",
+            "attempt": 1,
+            "success": true,
+            "singleAttempt": true,
+            "localModel": {
+              "pid": 31,
+              "createdUtc": "2026-11-20T00:00:00.000Z"
+            }
+          }
+        ]
+      },
+      "inputMode": "replay",
+      "intervalMs": 1000
+    }
   ]
 }
