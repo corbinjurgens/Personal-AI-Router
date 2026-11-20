@@ -153,3 +153,49 @@ failed baseline reads leave the view unavailable. Stock UI startup and
 mutation paths are outside the experiment, including cluster identity setup,
 manual-node migration, service startup, startup registration, and updates.
 The private routing-attempt history stream is omitted in both experiments.
+
+### Known limit of the matched Electron live path
+
+Live windows share the production projection singleton returned by
+`getModularBridgeState()`. Retiring a generation clears projected discovery and
+proxy node sources, workload and error snapshots, and performance, and
+invalidates model observations. It does not clear every remembered engine fact,
+proxy port or download state that the production owner keeps as last-good
+values. A later successful response that omits an optional fact can therefore
+show a value from the previous generation. Failed baseline reads still leave
+the view unavailable.
+
+## Wails live input: not implemented
+
+The Wails host serves replay only; `-mode live` returns an error. The owner
+decided on 2026-11-20 to compare the hosts on replay and to record live Wails
+as inconclusive rather than change production code.
+
+The missing contract: the desktop's payload projection lives in
+`desktop/src/electron/service-bridge/` and cannot run in a webview as written.
+
+- `broadcaster.ts` imports Electron `BrowserWindow` and `push-bus.ts` (Node
+  `events`). `modular-state.ts` imports the broadcaster and reaches another
+  `BrowserWindow` import through `routing.ts` and `routing-delivery.ts`.
+- `node-info-poller.ts` imports `desktop/src/shared/utils/log.ts`, which uses
+  `fs`, `path`, the Electron path provider and the bounded log writer, and
+  hooks `process.stdout` and `process.stderr` on load.
+- `node-projection.ts` reads `process.platform` through `currentPlatform()`.
+- The poller reads local and unpaired node-info targets over direct HTTP. The
+  experiment webview's CSP and file filter do not allow that. The
+  `discovery:get-node-info` RPC covers registered self and admitted peers only
+  (`services/nvpair-node-scanner/node_info_rpc.go`, `getPeerNodeInfo`).
+
+Live Wails would need one of these:
+
+1. A browser-safe projection entry point in those modules. It would take a
+   typed push sink, a routing-history callback and the native platform as
+   inputs, and the Electron wiring would keep supplying the native versions.
+   Wails would also need a defined path for unpaired-node telemetry. Both
+   hosts would then relay allowlisted raw JSON-RPC, with projection running
+   in the shared renderer, fresh for each generation.
+2. A Go port of the projection, which would duplicate desktop policy.
+
+Until then, a comparison on replay input measures the shell (Electron versus
+Wails displaying identical bytes and events). Compare live end-to-end results
+only between stock and matched Electron.
